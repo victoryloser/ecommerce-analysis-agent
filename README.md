@@ -1,8 +1,18 @@
+<p align="center"><img src="docs/assets/project-banner.svg" alt="Ecommerce Analysis Agent" width="100%" /></p>
+
 # Ecommerce Analysis Agent
 
 **English** | [简体中文](README.zh-CN.md)
 
+**Ask business questions. Inspect the numbers.**
+
+[Quick start](#installation-and-startup) · [Features](#features) · [Screenshots](#screenshots) · [Data format](#supported-data-formats) · [Profile](https://github.com/victoryloser)
+
+[![Tests](https://github.com/victoryloser/ecommerce-analysis-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/victoryloser/ecommerce-analysis-agent/actions/workflows/ci.yml) · `Python 3.11` · `Gradio` · `DuckDB` · [MIT](LICENSE)
+
 Analyze ecommerce operations through natural-language questions. Explore product sales, order counts, repeat customers, reviews, and delivery performance, with follow-up questions, clarification, chart drilldowns, persistent sessions, and read-only SQL analysis.
+
+## Features
 
 | Feature | What you can do |
 |---|---|
