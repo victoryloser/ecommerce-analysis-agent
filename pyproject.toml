@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecommerce-analysis-agent"
+version = "0.1.0"
+description = "Conversational business analytics with structured plans and DuckDB"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+  "duckdb>=1.4,<2", "sqlglot>=27,<31", "pydantic>=2.10,<3",
+  "openpyxl>=3.1,<4", "httpx>=0.28,<1", "python-dotenv>=1,<2",
+  "gradio>=6.31,<7", "pandas>=2.2,<4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+ecommerce-import = "app.import_data:main"
+ecommerce-chat = "app.cli:main"
+ecommerce-ui = "app.ui:main"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

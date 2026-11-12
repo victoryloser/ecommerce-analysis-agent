@@ -1,0 +1,26 @@
+.venv/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.build/
+data/
+runs/
+dist/
+build/
+.streamlit/secrets.toml
+
+# 本地业务数据和示例数据不进入仓库。
+material/
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.sqlite
+*.sqlite3
+*.db
