@@ -16,7 +16,7 @@ DATA_SUFFIXES = {".csv", ".xlsx", ".xls", ".parquet", ".duckdb", ".sqlite", ".sq
 def main():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     paths = [ROOT / name for name in
-             ("README.md", "LICENSE", "pyproject.toml", "requirements.lock.txt", ".env.example", ".gitignore", ".gitattributes")]
+             ("README.md", "README.zh-CN.md", "LICENSE", "pyproject.toml", "requirements.lock.txt", ".env.example", ".gitignore", ".gitattributes")]
     for folder in DIRECTORIES:
         paths.extend(path for path in (ROOT / folder).rglob("*")
                      if path.is_file() and path.name != ".env"

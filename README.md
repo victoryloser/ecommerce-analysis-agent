@@ -1,53 +1,55 @@
-# 经营数据分析
+# Ecommerce Analysis Agent
 
-通过自然语言查询经营数据，查看销售额、订单量、复购、评价及履约指标。支持多轮追问、条件澄清、图表下钻、长期会话和只读 SQL 分析。
+**English** | [简体中文](README.zh-CN.md)
 
-| 能力 | 使用方式 |
+Analyze ecommerce operations through natural-language questions. Explore product sales, order counts, repeat customers, reviews, and delivery performance, with follow-up questions, clarification, chart drilldowns, persistent sessions, and read-only SQL analysis.
+
+| Feature | What you can do |
 |---|---|
-| 自然语言问数 | 描述要查询的指标、日期和筛选条件，获取表格与图表 |
-| 连续分析 | 继续追问、补充年份，或点击分组进一步查看明细 |
-| 历史与导出 | 恢复本机会话，下载当前页或完整查询结果 |
-| SQL 分析 | 对原始表或完整分析结果执行只读 SQL |
-| 数据接入 | 上传符合当前电商表结构的 Excel / CSV，核对字段后导入 |
+| Natural-language queries | Describe metrics, dates, and filters to get tables and charts |
+| Follow-up analysis | Refine a question, supply a missing year, or click a group to inspect its details |
+| History and exports | Restore local sessions and download the current page or complete query results |
+| SQL workspace | Run read-only SQL against source tables or the complete result of a previous analysis |
+| Data import | Upload Excel / CSV files that follow the supported ecommerce schema and confirm field mappings |
 
-## 界面预览
+## Screenshots
 
-截图使用临时生成的虚构记录和固定模型响应，展示界面操作与计算结果。仓库不包含业务数据文件。
+The screenshots use temporary, fictional records and scripted model responses to demonstrate the interface and database calculations. Business data files are not included in this repository. The current interface and screenshots use Chinese labels.
 
-![经营数据分析：查询结果与导出入口](docs/images/analysis.png)
+![Analysis results and export controls](docs/images/analysis.png)
 
 <details>
-<summary>查看首次启动与数据上传界面</summary>
+<summary>First launch and data upload</summary>
 
-![首次启动：上传 Excel 或 CSV 接入自己的数据](docs/images/first-run.png)
+![First launch: upload your own Excel or CSV files](docs/images/first-run.png)
 
 </details>
 
-## 架构
+## Architecture
 
 ```mermaid
 flowchart TD
-    A["Excel / CSV"] --> B["字段映射与校验"]
+    A["Excel / CSV"] --> B["Field mapping and validation"]
     B --> C[(DuckDB)]
-    D["用户问题与会话上下文"] --> E["模型生成分析计划"]
-    E --> F["语义校验、SQL 编译与审计"]
-    F --> G["只读执行"]
+    D["Question and session context"] --> E["Model generates an analysis plan"]
+    E --> F["Semantic validation, SQL compilation and audit"]
+    F --> G["Read-only execution"]
     C --> G
-    G --> H["表格、图表与导出"]
-    H --> I["本机会话与查询记录"]
+    G --> H["Tables, charts and exports"]
+    H --> I["Local sessions and query records"]
     I -.-> D
 ```
 
-模型负责理解问题和规划查询，数据库负责金额、比例和排名等数值计算。详细处理链路见 [开发文档](docs/development.md)。
+The model interprets questions and plans queries. The database calculates amounts, ratios, and rankings. See the [development guide (Chinese)](docs/development.md) for the processing pipeline.
 
-## 环境要求
+## Requirements
 
 - Python 3.11
-- 支持 Chat Completions 和 JSON 输出的模型服务
+- A model service that supports Chat Completions and JSON output
 
-## 安装与启动
+## Installation and startup
 
-在项目目录执行：
+Run these commands in the project directory on Windows:
 
 ```powershell
 python -m venv .venv
@@ -56,88 +58,99 @@ python -m venv .venv
 Copy-Item .env.example .env
 ```
 
-在 .env 中填写模型配置：
+Configure the model service in `.env`:
 
-| 配置 | 含义 |
+| Variable | Meaning |
 |---|---|
-| LLM_BASE_URL | 模型接口地址，不包含 /chat/completions |
-| LLM_API_KEY | API 密钥 |
-| LLM_MODEL | 模型标识 |
-| LLM_TIMEOUT_SECONDS | 请求超时，默认 60 秒 |
+| `LLM_BASE_URL` | API base URL, without `/chat/completions` |
+| `LLM_API_KEY` | API key |
+| `LLM_MODEL` | Model identifier |
+| `LLM_TIMEOUT_SECONDS` | Request timeout; defaults to 60 seconds |
 
-启动应用：
+Start the application:
 
 ```powershell
 $env:PYTHONUTF8='1'
 .venv/Scripts/python.exe -m app.ui
 ```
 
-浏览器访问 http://127.0.0.1:7860 。首次打开时，在“接入新的Excel/CSV数据”中上传自己的文件，点击“识别文件”，核对字段对应关系后导入。导入文件和执行手写 SQL 不需要调用模型；自然语言分析及生成 SQL 草稿需要填写有效模型配置。
+On Linux or macOS:
 
-仓库不包含业务数据、示例数据、数据库或历史对话。导入后的文件、数据库和会话保存在本机 `data/`，查询记录及导出结果保存在 `runs/`，均不进入 Git。Linux/macOS 将 `.venv/Scripts/python.exe` 替换为 `.venv/bin/python`。
+```bash
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements.lock.txt
+.venv/bin/python -m pip install --no-deps -e .
+cp .env.example .env
+# Fill in the model settings in .env before asking natural-language questions.
+PYTHONUTF8=1 .venv/bin/python -m app.ui
+```
 
-## 支持的数据格式
+Open http://127.0.0.1:7860. On first launch, expand the data import section (`接入新的Excel/CSV数据`), upload your files, select **Identify files** (`识别文件`), confirm the field mappings, and import the dataset. Importing files and executing manually written SQL do not call the model. Natural-language analysis and SQL draft generation require valid model settings.
 
-| 文件格式 | 要求 |
+Business data, sample datasets, databases, and conversation history are not distributed with the source code. Imported files, databases, and sessions are stored locally in `data/`; query records and exports are stored in `runs/`. These directories are excluded from Git.
+
+## Supported data formats
+
+| Format | Requirements |
 |---|---|
-| Excel `.xlsx` | 首行为字段名，一张工作表对应一张业务表，可上传一个或多个工作簿 |
-| CSV `.csv` | UTF-8 或 UTF-8 BOM 编码，首行为字段名，一个文件对应一张业务表 |
+| Excel `.xlsx` | Column names in the first row; one business table per worksheet; one or more workbooks |
+| CSV `.csv` | UTF-8 or UTF-8 BOM encoding; column names in the first row; one business table per file |
 
-当前版本按电商经营数据模型进行分析，需要订单、客户、订单商品明细、支付、评价、商品、商家、品类和地理信息共九张业务表。文件名、工作表名和列名可以不同，在导入页面确认对应关系即可。
+The current version uses an ecommerce data model with nine business tables: orders, customers, order items, payments, reviews, products, sellers, categories, and geolocation. File names, worksheet names, and column names may differ; confirm their mappings during import.
 
-完整字段、数据类型、主键及关联要求见 [数据格式说明](docs/data-format.md)。文件符合 Excel/CSV 格式后，还需要符合这些业务表结构，系统才能计算已定义的经营指标。
+See the [data format specification (Chinese)](docs/data-format.md) for all fields, types, primary keys, and relationships. Files must satisfy both the file format and business schema requirements for the defined metrics to work.
 
-## 使用
+## Usage
 
-选择数据集后输入问题，例如：
+Select a dataset and ask a question, for example:
 
-- “2025 年 4 月商品销售额是多少？”
-- “比 3 月增长多少？”
-- “按品类看销售额，再查看电子产品的商家分布。”
+- "What were product sales in April 2025?"
+- "How much did that change compared with March?"
+- "Show sales by category, then show the seller breakdown for electronics."
 
-月份缺少年份时，系统根据会话条件继续分析或请求补充。界面中的示例问题直接注明年份。
+If a month has no year, the agent uses the established session context or asks for clarification. Suggested questions state a year when one is needed.
 
-分析结果包含表格、图表和计算依据。点击分组可下钻，返回上层可恢复之前的结果。历史会话支持检索与恢复；新建会话后原有记录仍可访问。
+Results include tables, charts, and calculation definitions. Click a group to drill down; return to the previous level to restore its result. Saved sessions can be searched and restored. Starting a new session keeps existing history available.
 
-SQL 工作区可查询原始表或上次完整分析结果，支持手工编辑 SQL、生成草稿及导出 CSV。数据上传支持九张业务表的字段映射与独立数据集导入。
+The SQL workspace supports source-table queries and further analysis of the complete previous result, with editable SQL, generated drafts, and CSV exports. Each imported dataset has its own data snapshot.
 
-命令行入口：
+The command-line interface uses the same local datasets and sessions:
 
 ```powershell
 .venv/Scripts/python.exe -m app.cli
 ```
 
-命令行默认使用已导入的首个数据集，也可以通过 `--dataset 数据集ID` 指定数据集。首次使用时先通过页面导入数据。
+The CLI selects the first imported dataset by default. Use `--dataset DATASET_ID` to choose another. Import data through the web interface before using the CLI for the first time. On Linux or macOS, use `.venv/bin/python`.
 
-## 数据口径
+## Metric definitions
 
-默认商品销售额使用已送达订单及下单时间，不含运费。其他状态、日期字段和范围可在查询中指定。指标定义见 [指标口径](docs/metrics.md)。
+By default, product sales use delivered orders, are filtered by purchase time, and exclude freight. Other order statuses, date fields, and periods can be requested explicitly. See the [metric definitions (Chinese)](docs/metrics.md).
 
-模型生成结构化分析计划，数据库执行数值计算。自由 SQL 的自定义计算标记为探索结果。数据库为只读查询；更新源文件后停止应用并重新导入。
+The model generates structured analysis plans; the database performs numerical calculations. Custom SQL calculations are presented as exploratory results. Queries are read-only. After changing source files, stop the application and reimport the data.
 
-## 项目结构
+## Project structure
 
-| 目录 | 职责 |
+| Directory | Purpose |
 |---|---|
-| app/ | 规划、指标定义、SQL 执行、会话和界面 |
-| tests/ | 业务与流程测试 |
-| scripts/ | 检查与开发工具 |
-| docs/ | 架构和开发说明 |
-| data/ | 本地数据快照、上传数据和会话库 |
-| runs/ | 查询证据和运行日志 |
+| `app/` | Planning, metric definitions, SQL execution, sessions, and UI |
+| `tests/` | Business-logic and workflow tests |
+| `scripts/` | Validation, release, and development tools |
+| `docs/` | Data schema, architecture, and development documentation |
+| `data/` | Local snapshots, imported files, and session database; excluded from Git |
+| `runs/` | Local query records and exports; excluded from Git |
 
-## 测试
+## Tests
 
 ```powershell
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-测试包含临时生成的最小业务记录，用于验证无数据启动、Excel/CSV 导入及查询，不调用真实模型服务。历史样例回归需要本机另行提供样例文件，缺少文件时会明确跳过；说明见 [开发文档](docs/development.md)。
+Tests generate minimal temporary records to verify first launch, Excel / CSV import, and queries without calling a real model service. Historical sample regressions require locally supplied sample files and are explicitly skipped when those files are unavailable. See the [development guide (Chinese)](docs/development.md) for details.
 
-[GitHub Actions](.github/workflows/ci.yml) 在推送代码或提交 Pull Request 时，使用 Python 3.11 分别在 Ubuntu 和 Windows 上安装依赖、运行离线测试并检查源码打包。无需配置模型 API 密钥，测试报告保留七天。
+[GitHub Actions](.github/workflows/ci.yml) runs on pushes and pull requests. It installs dependencies, runs offline tests, and checks source packaging on Ubuntu and Windows with Python 3.11. No model API key is required. Test reports are retained for seven days.
 
-界面截图可按 [开发文档](docs/development.md#文档截图) 中的命令重新生成；该过程使用临时虚构记录，不读取本机业务数据。
+To regenerate the screenshots, follow the [screenshot instructions (Chinese)](docs/development.md#文档截图). The process uses temporary fictional records and does not read local business data.
 
-## 许可证
+## License
 
-项目采用 [MIT License](LICENSE)，允许使用、修改和分发，分发时需保留版权和许可声明。第三方依赖遵循各自的许可证。
+This project is licensed under the [MIT License](LICENSE). You may use, modify, and redistribute it while retaining the copyright and license notice. Third-party dependencies retain their respective licenses.
