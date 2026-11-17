@@ -55,6 +55,13 @@ class PlanUpdate(Contract):
     comparison_mode: Literal["none", "fixed", "previous_month"] | None = None
     target_step: int | None = Field(default=None, ge=1, le=6)
 
+    @model_validator(mode="after")
+    def replacement_values(self):
+        if self.operation != "reset" and self.field in {"dimension", "metric_ids", "order_statuses", "time_field", "contribution_direction", "intent", "top_n", "min_group_count", "detail_level", "limit_mode"}:
+            if self.operation != "set" or not self.values:
+                raise ValueError(f"{self.field} 需要operation=set并提供values；set intent=aggregate会自动重置limit_mode，无需删除limit_mode")
+        return self
+
 
 class AnalysisPlan(Contract):
     dataset_id: DatasetId
@@ -113,6 +120,8 @@ class AnalysisPlan(Contract):
     def normalize_grouping(self):
         if self.update is not None and self.updates:
             raise ValueError("update 与 updates 不能同时提供")
+        if self.intent == "update" and (self.time_range is not None or self.comparison_range is not None):
+            raise ValueError("intent=update的日期必须写在updates对应字段的period中，删除最外层time_range/comparison_range以免日期被忽略")
         if self.group_by is not None:
             if len(set(self.group_by)) != len(self.group_by):
                 raise ValueError("分组维度不能重复")

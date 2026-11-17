@@ -271,7 +271,7 @@ def test_runner_two_replicates_isolate_sessions(synthetic, isolated_runs, tmp_pa
 def test_runner_accepts_unchanged_same_session_workflow_evidence(synthetic, isolated_runs, tmp_path):
     from app.models import PlanUpdate
     executor, oracle = synthetic
-    third = contract(executor.manifest, "B3").model_copy(update={"intent": "update", "limitations": ["profit"],
+    third = contract(executor.manifest, "B3").model_copy(update={"intent": "update", "time_range": None, "limitations": ["profit"],
         "updates": [PlanUpdate(operation="set", field="intent", values=["aggregate"]),
                     PlanUpdate(operation="set", field="metric_ids", values=["order_count", "sales", "freight"]),
                     PlanUpdate(operation="set", field="category_id", values=["electronics"])]})
@@ -295,3 +295,53 @@ def test_runner_accepts_unchanged_same_session_workflow_evidence(synthetic, isol
     assert not lineage(foreign)
     evidence["steps"][1]["question"] = "changed after reuse"
     assert not lineage(previous["evidence_records"])
+
+
+@pytest.mark.parametrize("malformation", ["remove_limit", "outer_period"])
+def test_update_format_repair_precedes_queries(synthetic, isolated_runs, malformation):
+    from app.models import AnalysisPlan, PlanUpdate
+    from app.trace import TurnTrace
+    executor, _ = synthetic
+    manifest = executor.manifest
+    changes = [PlanUpdate(operation="set", field="time_range", period={"start": "2027-03-01", "end": "2027-04-01"}),
+               PlanUpdate(operation="set", field="intent", values=["aggregate"])]
+    corrected = AnalysisPlan(dataset_id=manifest["dataset_id"], metadata_version=manifest["metadata_version"], intent="update", updates=changes)
+    malformed = corrected.model_dump(mode="json")
+    if malformation == "remove_limit":
+        malformed["updates"].append({"operation": "remove", "field": "limit_mode"})
+    else:
+        malformed["time_range"] = malformed["updates"].pop(0)["period"]
+    class Repair:
+        model = "format-repair-test"
+        def __init__(self):
+            self.calls = 0
+        def complete(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps(malformed)
+            assert "修正JSON结构" in messages[-1]["content"]
+            return corrected.model_dump_json()
+    session = Session(manifest["dataset_id"], working_plan=contract(manifest, "A2"))
+    provider = Repair()
+    trace = TurnTrace(session.session_id, session.dataset_id, "改成三月汇总", provider.model)
+    turn = AnalysisAgent(provider, {session.dataset_id: executor}).respond(session, "改成三月汇总", trace=trace)
+    assert provider.calls == 2 and trace.counts()["query_calls"] == 1
+    assert turn.evidence["plan"]["time_range"] == {"start": "2027-03-01", "end": "2027-04-01"}
+    assert session.working_plan.intent == "aggregate" and session.working_plan.limit_mode == "top_n"
+
+
+def test_invalid_update_structure_still_stops_after_three_calls(synthetic, isolated_runs):
+    executor, _ = synthetic
+    class Invalid:
+        model = "invalid-update-test"
+        def complete(self, messages):
+            return json.dumps({"dataset_id": executor.manifest["dataset_id"], "metadata_version": executor.manifest["metadata_version"],
+                               "intent": "update", "updates": [{"operation": "remove", "field": "limit_mode"}]})
+    from app.trace import TurnTrace
+    session = Session(executor.manifest["dataset_id"], working_plan=contract(executor.manifest, "A2"))
+    before = session.working_plan.model_dump()
+    trace = TurnTrace(session.session_id, session.dataset_id, "invalid", Invalid.model)
+    turn = AnalysisAgent(Invalid(), {session.dataset_id: executor}).respond(session, "invalid", trace=trace)
+    assert "连续三次" in turn.text
+    assert trace.counts()["model_calls"] == 3 and trace.counts()["query_calls"] == 0
+    assert session.working_plan.model_dump() == before

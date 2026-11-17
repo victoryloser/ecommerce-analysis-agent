@@ -86,8 +86,6 @@ def apply_update(plan: AnalysisPlan, update: PlanUpdate, manifest: dict, tasks=N
             raise PlanError(f"{field} 需要一个值")
         changes[field] = update.values[0] if update.operation == "set" else None
     elif field in {"dimension", "metric_ids", "order_statuses", "time_field", "contribution_direction", "intent", "top_n", "min_group_count", "detail_level", "limit_mode"}:
-        if update.operation != "set" or not update.values:
-            raise PlanError(f"{field} 需要提供替换值")
         changes[field] = update.values if field in {"metric_ids", "order_statuses"} else update.values[0]
         if field == "dimension":
             changes.update(group_by=None, rank_within=None, contribution_within=None)
