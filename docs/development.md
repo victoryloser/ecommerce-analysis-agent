@@ -44,7 +44,7 @@ SQL 可访问原始表或上次完整分析结果。后者重新编译成功计�
 
 历史样例回归仍保留：`excel_full` 使用本机 `material/ecommerce_agent_demo.xlsx`，`csv_small` 使用 `material/ecommerce_agent_demo_csv/` 下按标准表名命名的九个 CSV 文件。缺少这些文件时，相应测试标记为跳过。有文件时可先运行 `python -m app.import_data`，再运行完整测试及 `scripts/check_*_ui.py`。`app.demo`、`app.baseline`、`app.evaluate` 和录屏脚本均属于这些本地样例工具。
 
-`scripts/build_release.py` 仅打包代码和文档，不包含 `material/` 或数据文件；`scripts/verify_release.py` 在干净环境运行测试，并记录缺少本地样例导致的跳过项。
+`python scripts/build_release.py --commit HEAD` 从指定提交读取代码与文档，按产品清单排除方案、数据、运行记录及 `AGENTS.md`；未提交修改不进入包。`scripts/verify_release.py` 在干净环境运行离线测试，记录缺少材料导致的跳过项，不代表正式数据或真实模型验收。正式评测与录屏见 [R2 评测操作说明](round2-evaluation.md)。
 
 ## 自动测试
 

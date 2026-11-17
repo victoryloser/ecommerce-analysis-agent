@@ -24,8 +24,8 @@ class AnalysisAgent:
         self.executors = executors
         self.store = store
 
-    def respond(self, session: Session, question: str, practice_context: bool = False) -> Turn:
-        with TurnTrace(session.session_id, session.dataset_id, question, self.provider.model if self.provider else "deterministic-resume") as trace:
+    def respond(self, session: Session, question: str, practice_context: bool = False, *, trace: TurnTrace | None = None) -> Turn:
+        with trace or TurnTrace(session.session_id, session.dataset_id, question, self.provider.model if self.provider else "deterministic-resume") as trace:
             turn = self._respond(session, question, practice_context, trace)
             session.last_evidence = turn.evidence
             if turn.evidence.get("type") == "workflow":

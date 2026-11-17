@@ -12,6 +12,8 @@ import tomllib
 import xml.etree.ElementTree as ET
 from zipfile import ZipFile
 
+from build_release import allowed, commit_files
+
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = [
     ["source isolation", ["-c", "from pathlib import Path; from app.config import ROOT; assert ROOT == Path.cwd(); assert not (ROOT/'.env').exists(); assert not (ROOT/'material').exists()"]],
@@ -29,6 +31,7 @@ def main():
     assert archive_path.with_suffix(".sha256").read_text(encoding="utf-8").split()[0] == digest
     report_path = archive_path.with_suffix(".validation.json")
     report = {"project": name, "archive_sha256": digest, "status": "running",
+              "validation_scope": "offline-clean-package", "formal_data_acceptance": "not_run", "live_model_acceptance": "not_run",
               "created_at": datetime.now(timezone.utc).isoformat(), "model_calls": False, "steps": []}
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("LLM_", "JUDGE_", "SECOND_JUDGE_", "TAX_AGENT_"))
@@ -42,11 +45,17 @@ def main():
             with ZipFile(archive_path) as archive:
                 manifest = json.loads(archive.read("MANIFEST.json"))
                 assert set(archive.namelist()) == set(manifest["files"]) | {"MANIFEST.json"}
+                assert len(archive.namelist()) == len(set(archive.namelist())), "duplicate archive members"
+                report["commit_sha"] = manifest["commit_sha"]
+                if (ROOT / ".git").exists():
+                    _, expected = commit_files(ROOT, manifest["commit_sha"])
+                    assert set(expected) == set(manifest["files"]), "archive differs from commit allowlist"
+                    assert all(archive.read(n) == b for n, b in expected.items()), "archive bytes differ from commit"
                 for filename, item in manifest["files"].items():
                     payload = archive.read(filename)
                     assert hashlib.sha256(payload).hexdigest() == item["sha256"], filename
                     assert len(payload) == item["bytes"], filename
-                    assert Path(filename).name != ".env"
+                    assert allowed(filename), f"Excluded release member: {filename}"
                 archive.extractall(work)
             python = work / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 

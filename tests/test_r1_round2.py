@@ -46,6 +46,10 @@ def test_official_continuous_a_b_contracts(public_data, name, monkeypatch, tmp_p
     assert third.evidence['plan']['comparison_range'] is None
     assert third.evidence['result']['rows'][0][2] == reference['A3']['delivered_order_count']
     fourth = agent.respond(session, questions['A4'])
+    from app.round2_judge import judge
+    for case, turn in zip(('A1', 'A2', 'A3', 'A4'), (first, second, third, fourth)):
+        verdict = judge(case, manifest, datasets[name][2], turn.evidence, turn.text, turn_id=turn.evidence['turn_id'])
+        assert verdict['passed'], [c for c in verdict['checks'] if not c['passed']]
     assert all(t['status']=='completed' for t in session.workflow_tasks), fourth.text
     rank = fourth.evidence['steps'][0]['result']
     assert {r[0] for r in rank['rows']} == {r['seller_id'] for r in reference['A4']['ranking']}
@@ -86,6 +90,9 @@ def test_official_continuous_a_b_contracts(public_data, name, monkeypatch, tmp_p
     assert orders == reference['B3']['delivered_order_count']
     assert '无法计算促销' in third.text
     fourth = agent.respond(session, questions['B4'])
+    for case, turn in zip(('B1', 'B2', 'B3', 'B4'), (first, second, third, fourth)):
+        verdict = judge(case, manifest, datasets[name][2], turn.evidence, turn.text, turn_id=turn.evidence['turn_id'])
+        assert verdict['passed'], [c for c in verdict['checks'] if not c['passed']]
     assert all(t['status']=='completed' for t in session.workflow_tasks), fourth.text
     assert fourth.evidence['steps'][0]['result']['rows'][0][0] == 10714
     assert fourth.evidence['steps'][1]['result']['rows'][0][0] == 2378

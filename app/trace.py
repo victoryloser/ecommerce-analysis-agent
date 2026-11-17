@@ -1,6 +1,7 @@
 """每轮事件与调用预算。记录后重抛异常，不改变执行结果。"""
 import json
 import traceback
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -8,6 +9,8 @@ from uuid import uuid4
 import httpx
 
 from app.config import RUNS_DIR
+
+CURRENT_TRACE = ContextVar("current_turn_trace", default=None)
 
 
 class BudgetError(ValueError):
@@ -31,6 +34,10 @@ class TurnTrace:
     @property
     def event_file(self):
         return RUNS_DIR / self.dataset_id / "events" / f"{self.session_id}.jsonl"
+
+    @property
+    def event_ref(self):
+        return self.event_file.relative_to(RUNS_DIR).as_posix()
 
     def record(self, event: str, **payload):
         self.sequence += 1
@@ -56,17 +63,23 @@ class TurnTrace:
         self.record("budget", kind=kind, steps=self.steps, model_calls=self.model_calls)
 
     def __enter__(self):
+        self._context_token = CURRENT_TRACE.set(self)
         self.record("turn_started", question=self.question, model=self.model)
         return self
 
     def __exit__(self, error_type, error, tb):
+        CURRENT_TRACE.reset(self._context_token)
         if error is not None:
             # HTTP只记状态与错误类型，不写Authorization、URL参数或响应正文。
             frames = [{"file": f.filename, "line": f.lineno, "function": f.name} for f in traceback.extract_tb(tb)]
             self.record("turn_failed", failed_stage=self.stage, error_type=error_type.__name__,
                         error_message=str(error) if isinstance(error, ValueError) else None,
                         http_status=error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None,
-                        frames=frames, steps=self.steps, model_calls=self.model_calls)
+                        frames=frames, **self.counts())
         else:
-            self.record("turn_finished", steps=self.steps, model_calls=self.model_calls)
+            self.record("turn_finished", **self.counts())
         return False
+
+    def counts(self):
+        return {"steps": self.steps, "model_calls": self.model_calls,
+                "query_calls": self.query_calls, "catalog_calls": self.catalog_calls}

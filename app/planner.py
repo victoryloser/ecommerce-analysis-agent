@@ -30,6 +30,7 @@ output_mode默认analysis；需要商家排名并任选冠军有效订单核查�
 全期填写period_mode=full_coverage；明确日期用explicit_range。环比填写comparison_mode=previous_month；固定基期用fixed，删除比较用none。time_range更新通过update.period和period_mode传入；comparison_range通过update.period和comparison_mode传入。
 用户明确提出新问题时放弃旧澄清，不继承无关的过滤条件。
 compare需要显式当前和基期范围，支持多个指标及品类/商家/省份/履约状态分组。rank按首个指标降序且保留并列。
+比较两个整月的总体订单数、商品额或运费时，月份只写入time_range和comparison_range，dimension=total且不填写group_by；结果会分别展示两个月。dimension=month/group_by=[month]只用于aggregate逐月序列，不能用于compare两期比较。
 联合分析用group_by=[category,seller]或[month,category]且dimension=total；同一明细组成组合，不把订单的品类集合与商家集合交叉。支持sales/freight/order_count/delay_rate/avg_review/low_score_rate；评价与履约属于含该组合的整单样本，不是商品独有评分。含month只做aggregate/rank，不做两期compare/contribution。
 全局组合排名rank_within=null；每品类内商家排名rank_within=category，每月内品类排名rank_within=month。贡献可用contribution_within=category另列品类内分母，同时保留全范围贡献；看下降驱动用contribution_direction=decrease。Top N保留并列，分母不受Top N影响。
 增加/去掉分组用update.field=group_by、values为完整的新分组列表；取消品类或商家筛选用category_id/seller_id，不能混淆。联合分组不支持支付分摊及复购，遇混合问题拆为可支持的独立步骤。
@@ -49,6 +50,11 @@ compare需要显式当前和基期范围，支持多个指标及品类/商家/�
 若用户明确要求用真实订单/实际数字演示明细与支付的关联放大，使用join_example，metric_ids=[]、dimension=total、明确time_range（未指定期间用全期），不附加实体过滤。仅问原理仍用explain而不查库。
 缺信息输出clarify与clarification；不支持的分析输出unsupported与理由。纯解释不要求时间。
 metadata中没有促销等数据，不能臆造字段或作因果结论。不要输出没有根据的数字。
+输出前核对以下约束：
+1. 用户要求“逐类/所有品类/全部分组”的contribution，必须显式填写limit_mode="all"，不能省略后使用默认Top10。
+2. 用户要求“商家排名+冠军任一有效订单+整单核查/商品明细”，选择output_mode="seller_audit"，不编写steps，不猜订单ID。若在已有范围撤回品类：intent="update"，updates中remove category_id、set top_n，output_mode放在最外层。无需把intent改成workflow；workflow由宿主展开。
+3. updates中set intent仅用于aggregate/rank/compare/contribution/details/diagnose；不可set workflow。修改工作流组织直接用output_mode或完整workflow计划，不能将intent=update与steps混写。
+4. 两个月总体比较用compare+dimension="total"；月份是期间参数，不是分组维度。
 """
 
 

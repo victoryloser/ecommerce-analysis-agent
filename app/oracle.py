@@ -70,6 +70,7 @@ class SourceOracle:
             from app.semantic import load_manifest
             from app.snapshots import read_retained
             tables = read_retained(load_manifest(dataset_id, data_dir), data_dir) if (data_dir / f"{dataset_id}.manifest.json").exists() else read_source(dataset_id, data_dir)
+        self.raw_tables = tables
         self.raw_reviews = tables["order_reviews"]
         self.payment_details = defaultdict(list)
         self.quality_events = []
@@ -251,9 +252,16 @@ class SourceOracle:
         return rows if with_quality else [{k: v for k, v in row.items() if k != "__quality"} for row in rows]
 
     def _evaluate(self, plan: AnalysisPlan) -> list[dict]:
+        if plan.intent == "diagnose" and plan.diagnosis in {"quality_summary", "quality_rows", "order_candidate", "order_audit"}:
+            from app.oracle_inspection import inspect_source
+            return inspect_source(self, plan)
         dims = tuple(plan.group_by) if plan.group_by else (() if plan.dimension == "total" else (plan.dimension,))
         if plan.intent == "details":
-            return self.details(plan)
+            rows = self.details(plan)
+            if plan.detail_level == "items" and plan.audit_seller_id:
+                for row in rows:
+                    row["belongs_to_selected_seller"] = row["seller_id"] == plan.audit_seller_id
+            return rows
         if plan.intent == "diagnose" and plan.diagnosis in {"reconciliation", "quality"}:
             selected = self.details(plan.model_copy(update={"detail_level": "orders"}))
             if plan.diagnosis == "reconciliation":

@@ -12,6 +12,20 @@ from app.semantic import load_manifest
 
 def summarize(paths: list[Path]) -> dict:
     reports = [(path, json.loads(path.read_text(encoding="utf-8"))) for path in paths]
+    if any("matrix" in r for _, r in reports):
+        from app.round2_evaluate import summarize as round2_summary
+        if not all("matrix" in r for _, r in reports):
+            raise ValueError("正式 R2 与旧套件不能混合汇总")
+        if len({json.dumps(r["fingerprint"], sort_keys=True) for _, r in reports}) != 1 or len({r["mode"] for _, r in reports}) != 1:
+            raise ValueError("不同模式、题面、判定器、实现、模型配置或数据快照必须分别汇总")
+        if len({r["run_id"] for _, r in reports}) != len(reports):
+            raise ValueError("同一运行不能重复计分")
+        summaries = [round2_summary(r) for _, r in reports]
+        totals = {key: sum(s[key] for s in summaries) for key in ("total", "passed", "completed", "first_attempt_chains_passed", "chains_total", "recovery_attempts", "recovery_passed", "model_calls", "query_calls", "catalog_calls")}
+        return {**totals, "mode": reports[0][1]["mode"], "model": reports[0][1]["fingerprint"]["provider_config"]["model"],
+                "missing": [s for _, r in reports for s in r["matrix"] if not any(a["sample_id"] == s["sample_id"] for a in r["attempts"])],
+                "runs": [{"source_report": str(p), "run_id": r["run_id"], "scope": r["scope"], "summary": s}
+                         for (p, r), s in zip(reports, summaries)]}
     if len({report["model"] for _, report in reports}) != 1:
         raise ValueError("不同模型的验收结果必须分别汇总")
     if len({report["implementation_sha256"] for _, report in reports}) != 1:

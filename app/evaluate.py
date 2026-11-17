@@ -17,6 +17,7 @@ from app.oracle import SourceOracle, check_rows
 from app.orchestrator import AnalysisAgent
 from app.providers import ChatCompletionsProvider
 from app.session import Session
+from app.trace import TurnTrace
 
 
 def check_workflow_evidence(evidence, expected, oracle):
@@ -136,9 +137,12 @@ def evaluate(provider, executor, suite: str, selected: list[str]) -> dict:
         started = time.perf_counter()
         failure = None
         evidence = {}
+        answer_text = ""
+        trace = TurnTrace(session.session_id, dataset, case.question, provider.model)
         try:
-            turn = agent.respond(session, case.question, practice_context=case.practice)
+            turn = agent.respond(session, case.question, practice_context=case.practice, trace=trace)
             evidence = turn.evidence
+            answer_text = turn.text
             if case.expected_plan is None:
                 assert session.last_successful_plan is None and session.pending_plan is None and not session.history, "重置没有清空状态"
             else:
@@ -173,7 +177,9 @@ def evaluate(provider, executor, suite: str, selected: list[str]) -> dict:
                         "replicate_id": report["replicate_id"],
                         "conversation": case.conversation, "passed": failure is None, "failure": failure,
                         "elapsed_ms": round((time.perf_counter()-started)*1000),
-                        "planning_calls": evidence.get("planning_calls", 0), "evidence_id": evidence.get("record_id"),
+                        "planning_calls": trace.model_calls, "query_calls": trace.query_calls, "catalog_calls": trace.catalog_calls,
+                        "session_id": session.session_id, "turn_id": trace.turn_id, "answer_text": answer_text,
+                        "event_file": trace.event_ref, "evidence_id": evidence.get("record_id"),
                         "expected_plan": case.expected_plan.model_dump(mode="json") if case.expected_plan else None})
         report.update(passed=sum(r["passed"] for r in records), total=len(cases), completed=len(records),
                       categories={category: {"passed": sum(r["passed"] for r in records if r["category"] == category), "total": count}
