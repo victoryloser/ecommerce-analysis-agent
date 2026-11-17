@@ -24,7 +24,7 @@ def test_later_failure_overrides_pass_and_missing_cases_remain_in_denominator(tm
     second = report(tmp_path, "second.json", "2026-11-11T02:00:00+00:00", False)
     result = summarize([second, first])
     assert result["passed"] == 0 and result["completed"] == 1
-    assert result["total"] == 48 and len(result["missing"]) == 47
+    assert result["total"] == 54 and len(result["missing"]) == 53
     assert result["superseded"][0]["passed"] is True
 
 

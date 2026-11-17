@@ -7,6 +7,7 @@ from app.config import DATA_DIR, METADATA_VERSION
 from app.models import AnalysisIntent, AnalysisPlan
 from app.metadata import METRIC_DETAILS, metric_detail, required_tables, table_detail
 from app.source import SCHEMA
+from app.grouping import dimensions, JOINT_GROUPS
 
 METRICS = {
     "sales": "已送达订单商品明细 price 合计，元，不含运费；按品类/商家保留明细归属",
@@ -45,6 +46,7 @@ def catalog(manifest: dict) -> dict:
         "coverage": manifest["coverage"], "metrics": {m: {"summary": description, **metric_detail(m)} for m, description in METRICS.items()},
         "coverage_fields": manifest.get("coverage_fields", {"purchase_at": manifest["coverage"]}),
         "dimensions": ["total", "month", "category", "seller", "delivery_status", "customer_state"],
+        "joint_groups": JOINT_GROUPS,
         "entities": manifest["entities"], "relationships": RELATIONSHIPS,
         "time_field": "默认purchase_at；可显式选择approved_at/shipped_at/delivered_at/estimated_delivery_at，均为左闭右开",
         "order_statuses": manifest["entities"].get("order_statuses", ["delivered", "canceled", "shipped", "processing", "approved", "created", "invoiced", "unavailable"]),
@@ -59,6 +61,7 @@ def catalog(manifest: dict) -> dict:
             "history": "检索已保存会话，history_query为内容，history_start/end按会话更新时间左闭右开筛选",
             "predicates": "order_where用于订单粒度（order_sales/order_freight为完整订单金额），item_where用于明细粒度；分别支持all/any/negate与比较/IN/NOT IN/BETWEEN/空值",
             "rank": "非total维度，按第一个指标降序；按订单数门槛过滤，并保留边界并列",
+            "joint_analysis": "group_by支持category+seller和month+category；商品额、订单、延迟和整单评价；禁止支付分摊与联合复购。含month仅汇总/排名。rank_within指定组内排名，contribution_within指定品类内分母；contribution_direction=decrease查看下降驱动。",
         },
     }
 
@@ -67,7 +70,7 @@ def get_catalog(manifest: dict, plan: AnalysisPlan) -> dict:
     def fields(node):
         return ([node.field] if node.field else []) + [field for child in node.children for field in fields(child)] if node else []
     used = [f.field for f in plan.filters] + fields(plan.order_where) + fields(plan.item_where)
-    tables = required_tables(plan.metric_ids, plan.dimension, used, plan.intent)
+    tables = required_tables(plan.metric_ids, dimensions(plan), used, plan.intent)
     for step in plan.steps:
         tables.update(get_catalog(manifest, step)["tables"])
     if plan.explanation_topic == "joins":
@@ -79,6 +82,8 @@ def get_catalog(manifest: dict, plan: AnalysisPlan) -> dict:
             "metrics": {m: metric_detail(m) for m in plan.metric_ids},
             "tables": {t: table_detail(t) for t in sorted(tables)}, "relationships": RELATIONSHIPS}
     result["applied_scope"] = {"time_field": plan.time_field, "order_statuses": plan.order_statuses,
+                               "group_by": list(dimensions(plan)), "grouping_version": "joint-v1",
+                               "rank_within": plan.rank_within, "contribution_within": plan.contribution_within,
                                "order_where": plan.order_where.model_dump(mode="json") if plan.order_where else None,
                                "item_where": plan.item_where.model_dump(mode="json") if plan.item_where else None}
     for metric in result["metrics"].values():
@@ -96,7 +101,7 @@ def validate_workflow(plan: AnalysisPlan, manifest: dict) -> None:
         intent = step.pending_intent if step.intent == "clarify" else step.intent
         if intent not in {*get_args(AnalysisIntent), "explain", "unsupported"}:
             raise PlanError("工作流步骤必须是分析、解释或保留分析意图的澄清，不嵌套工作流")
-        if step.source_step and (step.source_step >= index or not step.bind_field):
+        if step.source_step and (step.source_step >= index or (step.bind_mode == "field" and not step.bind_field)):
             raise PlanError("依赖步骤必须引用前面的步骤并声明bind_field")
         validate_plan(step, manifest, allow_binding=True)
 
@@ -106,6 +111,17 @@ def validate_plan(plan: AnalysisPlan, manifest: dict, *, allow_binding=False) ->
         raise PlanError("计划的数据集或元数据版本与当前会话不一致")
     if plan.source_step and not allow_binding:
         raise PlanError("步骤依赖只用于workflow，执行前必须由宿主绑定真实结果")
+    dims = dimensions(plan)
+    if plan.group_by and dims not in JOINT_GROUPS:
+        raise PlanError("联合分组仅支持品类与商家、月份与品类")
+    if plan.group_by and plan.intent not in {"aggregate", "rank", "compare", "contribution", "clarify"}:
+        raise PlanError("联合分组用于汇总、排名、期间比较与商品额贡献")
+    if plan.rank_within and (len(dims) != 2 or plan.rank_within not in dims or plan.intent not in {"rank", "clarify"}):
+        raise PlanError("组内排名需要联合维度及其中一个排名分区")
+    if plan.contribution_within and (plan.intent != "contribution" or dims != ("category", "seller") or plan.contribution_within != "category"):
+        raise PlanError("父组贡献仅支持品类与商家分析中的品类内贡献")
+    if plan.bind_mode == "group" and not plan.source_step:
+        raise PlanError("组合绑定需要来源步骤")
     is_workflow = plan.intent == "workflow" or (plan.intent == "clarify" and plan.pending_intent == "workflow")
     if plan.steps and not is_workflow:
         raise PlanError("仅workflow使用steps")
@@ -170,14 +186,14 @@ def validate_plan(plan: AnalysisPlan, manifest: dict, *, allow_binding=False) ->
         return
     if not plan.metric_ids or len(set(plan.metric_ids)) != len(plan.metric_ids):
         raise PlanError("需要不重复的指标列表")
-    if plan.intent == "rank" and plan.dimension == "total":
+    if plan.intent == "rank" and not dims:
         raise PlanError("排名需要分组维度")
-    if plan.dimension == "total" and plan.min_group_count != 1:
+    if not dims and plan.min_group_count != 1:
         raise PlanError("订单数门槛只用于分组分析")
     if plan.intent in {"compare", "contribution"}:
-        if plan.comparison_range is None or plan.dimension == "month":
+        if plan.comparison_range is None or "month" in dims:
             raise PlanError("比较需要明确基期；逐月序列请按月汇总，分组比较选择品类/商家/省份/履约状态")
-        if plan.intent == "contribution" and (len(plan.metric_ids) != 1 or plan.metric_ids[0] not in {"sales", "payment_amount"} or plan.dimension == "total"):
+        if plan.intent == "contribution" and (len(plan.metric_ids) != 1 or plan.metric_ids[0] not in {"sales", "payment_amount"} or not dims):
             raise PlanError("增长贡献需要一个可加金额指标及非total分组，不能把比例或重复归属订单数直接相加")
     elif plan.comparison_range is not None:
         raise PlanError("仅compare计划使用comparison_range")
@@ -193,12 +209,12 @@ def validate_plan(plan: AnalysisPlan, manifest: dict, *, allow_binding=False) ->
         if not set(filter_.values) <= allowed[filter_.field]:
             raise PlanError(f"{filter_.field} 包含字典外的值，请选择已提供的实体ID")
     if "repeat_customers" in plan.metric_ids:
-        if len(plan.metric_ids) != 1 or plan.dimension not in {"total", "month", "customer_state"}:
+        if len(plan.metric_ids) != 1 or plan.group_by or plan.dimension not in {"total", "month", "customer_state"}:
             raise PlanError("复购客户数仅支持独立计算及全站/月/客户省份分组")
         if plan.min_group_count != 1:
             raise PlanError("复购分析暂不支持分组订单门槛")
     if "payment_amount" in plan.metric_ids:
-        if plan.dimension in {"category", "seller"} or set(fields) & {"category_id", "seller_id"} or plan.item_where is not None:
+        if set(dims) & {"category", "seller"} or set(fields) & {"category_id", "seller_id"} or plan.item_where is not None:
             raise PlanError("没有商家/品类支付额分摊规则，请改查商品销售额或全站支付额")
     if set(plan.metric_ids) & {"avg_review", "low_score_rate"} and manifest["quality"]["duplicate_review_orders"]:
         raise PlanError("存在一单多评价，需先明确评价归并口径")

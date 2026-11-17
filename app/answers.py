@@ -5,6 +5,8 @@ from app.models import AnalysisPlan, QueryResult
 from app.semantic import METRICS, RELATIONSHIPS
 
 LABELS = {
+    "month": "月份", "category_name": "品类", "parent_change": "品类内净变化额（元）",
+    "parent_contribution_rate": "品类内净变化贡献率",
     "membership_confirmed": "已确认符合筛选", "order_sales_known": "已确认商品金额", "order_sales_unknown": "未知商品金额成分数",
     "order_freight_known": "已确认运费", "order_freight_unknown": "未知运费成分数", "payment_known": "已确认支付金额",
     "payment_unknown": "未知支付金额成分数", "payment_missing": "整单缺支付记录",
@@ -70,7 +72,7 @@ def cell(column: str, value, plan: AnalysisPlan) -> str:
     if metric in {"delay_rate", "low_score_rate", "change_rate"}:
         suffix = " 个百分点" if column == "absolute_change" or column.endswith("_change") else "%"
         return str((Decimal(str(value)) * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)) + suffix
-    if metric in {"sales", "payment_amount", "avg_review", "inflated_sales", "inflated_payment", "order_sales", "order_freight", "difference", "price", "freight_value", "payment_value", "total_change"}:
+    if metric in {"sales", "payment_amount", "avg_review", "inflated_sales", "inflated_payment", "order_sales", "order_freight", "difference", "price", "freight_value", "payment_value", "total_change", "parent_change"}:
         return str(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
     return str(value).replace("|", "\\|").replace("\n", " ")
 
@@ -92,8 +94,12 @@ def conclusion(plan: AnalysisPlan, result: QueryResult) -> str:
         direction = "增长" if rate is not None and rate > 0 else "下降" if rate is not None and rate < 0 else "持平"
         change = f"{direction}，变化率 {cell('change_rate', rate, plan)}" if rate is not None else "变化率不可计算（基期为零或数据缺失）"
         return f"本期 {cell('current_value', row['current_value'], plan)}，基期 {cell('previous_value', row['previous_value'], plan)}；{change}。"
-    if plan.intent == "rank" and row[plan.metric_ids[0]] is not None:
-        if row["rank_no"] is None:
+    if plan.intent == "rank":
+        if plan.rank_within:
+            return "各父分组独立排名，保留边界并列；未知候选只影响所属分区，具体名次见下表。"
+        if result.row_offset:
+            return "当前为排名结果的后续页，不能根据本页首行推断总体第一名。"
+        if row["rank_no"] is None or row[plan.metric_ids[0]] is None:
             return "存在未知候选，无法确认总体排名；已确认金额仅供查看。"
         ranked_rows = [dict(zip(result.columns, values)) for values in result.rows]
         leaders = [r for r in ranked_rows if r["rank_no"] == 1]
@@ -149,14 +155,26 @@ def advanced_answer(plan: AnalysisPlan, result: QueryResult, manifest: dict) -> 
     if not result.rows:
         return text + "\n\n没有符合当前条件的记录。"
     notes = []
+    if plan.group_by:
+        names = {"category": "品类", "seller": "商家", "month": "月份"}
+        notes.append("联合分组：" + " × ".join(names[d] for d in plan.group_by) + "。商品额按实际明细归属；各组合订单数不能相加作为总体订单数。")
+        if set(plan.metric_ids) & {"delay_rate", "avg_review", "low_score_rate"}:
+            notes.append("履约与评价统计的是包含该组合商品的整单样本；各组合可包含同一订单，父级比率与评分需重新去重计算。")
+    if plan.intent == "rank":
+        notes.append(conclusion(plan, result))
+        notes.append(f"组合内至少{plan.min_group_count}单；{'各父分组内' if plan.rank_within else '全部分组中'}取前{plan.top_n}名并保留并列。")
     if plan.intent == "contribution":
         first = dict(zip(result.columns, result.rows[0]))
         metric = plan.metric_ids[0]
         if first["total_change"] is not None:
-            notes.append(f"增长贡献最大的分组：{first['entity_name']}，变化额 {cell(metric+'_change', first[metric+'_change'], plan)}。")
+            direction = "升序，优先查看下降驱动" if plan.contribution_direction == "decrease" else "降序，优先查看增长驱动"
+            notes.append(f"按变化额{direction}；当前完整分析范围净变化 {cell('total_change', first['total_change'], plan)} 元。")
         else:
             notes.append("部分分组变化未知，不能确认总体贡献排名和净增长贡献率。完整分组仍展示变化额。")
         notes.append("贡献率=分组变化额/整体净变化额；下降可为负，正向贡献可超过100%；净变化为0时不可计算。")
+        notes.append(f"展示前{plan.top_n}名及并列，分母使用全部符合业务筛选的组合，不受订单展示门槛、Top N或分页影响。")
+        if plan.contribution_within:
+            notes.append("另列品类内贡献：组合变化额/所在品类净变化额；该品类变化为零或未知时比例不可计算。")
     elif plan.intent == "compare":
         notes.append("按分组对齐本期与基期；可加指标缺失分组记0，缺评分/比率保留不可计算；基期0时变化率不可计算。")
     elif plan.intent == "diagnose":
@@ -172,7 +190,7 @@ def advanced_answer(plan: AnalysisPlan, result: QueryResult, manifest: dict) -> 
     if plan.comparison_range:
         notes.append(f"对比日期：{period_text(plan.comparison_range)}。")
         if plan.min_group_count > 1:
-            notes.append(f"仅展示两期均至少{plan.min_group_count}单的分组；贡献率分母仍使用全部分组的净变化。")
+            notes.append(f"两期分别至少{plan.min_group_count}单；资格未知的候选保留说明，确定不满足者不展示；贡献率分母仍使用全部分组的净变化。")
     if plan.order_where or plan.item_where:
         notes.append("订单条件按整单金额、状态或评分筛选，商品条件按商品明细筛选。")
     table = "| " + " | ".join(plan_label(c, plan) for c in result.columns) + " |\n| " + " | ".join("---" for _ in result.columns) + " |\n"

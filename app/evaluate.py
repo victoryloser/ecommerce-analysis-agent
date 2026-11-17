@@ -3,7 +3,7 @@ import argparse
 import json
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import uuid4
 
 import httpx
@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from app.config import DATASETS, RUNS_DIR
 from app.evaluation_cases import assert_plan, cases_for
 from app.executor import Executor
-from app.models import AnalysisPlan, EntityFilter, QueryResult
+from app.models import AnalysisPlan, EntityFilter, QueryResult, Predicate, TimeRange
 from app.oracle import SourceOracle, check_rows
 from app.orchestrator import AnalysisAgent
 from app.providers import ChatCompletionsProvider
@@ -37,22 +37,62 @@ def check_workflow_evidence(evidence, expected, oracle):
             if not result["rows"] or step.source_row >= len(result["rows"]):
                 assert task["status"] == "needs_input"
                 continue
-            row = dict(zip(result["columns"], result["rows"][step.source_row]))
-            source_plan = expected.steps[step.source_step-1]
+            source_plan = AnalysisPlan.model_validate(evidence["steps"][step.source_step-1]["plan"])
+            indexed = [(i, dict(zip(result["columns"], row))) for i, row in enumerate(result["rows"])]
+            partition = source_plan.rank_within or source_plan.contribution_within
+            if partition:
+                field = "month" if partition == "month" else partition+"_id"
+                parents = {row[field] for _, row in indexed}
+                if step.source_partition is None and len(parents) > 1:
+                    assert task["status"] == "needs_input", "多个父分组应先明确目标"
+                    continue
+                chosen = step.source_partition if step.source_partition is not None else next(iter(parents))
+                indexed = [(i, row) for i, row in indexed if row[field] == chosen]
+            if step.source_row >= len(indexed):
+                assert task["status"] == "needs_input"
+                continue
+            row = indexed[step.source_row][1]
             ranking = "rank_no" if source_plan.intent == "rank" else source_plan.metric_ids[0]+"_change" if source_plan.intent == "contribution" else None
             metric = source_plan.metric_ids[0] if source_plan.metric_ids else None
             relevant = {metric, f"{metric}_current", f"{metric}_previous"}
-            incomplete = any(q and q["completeness"] != "complete" for values in result.get("quality", []) for name, q in values.items() if name in relevant)
-            tied = ranking and (row[ranking] is None or sum(values[result["columns"].index(ranking)] == row[ranking] for values in result["rows"]) > 1)
+            incomplete = any(q and q["completeness"] != "complete" for i, _ in indexed for name, q in (result["quality"][i] if result.get("quality") else {}).items() if name in relevant)
+            tied = ranking and (row[ranking] is None or sum(other[ranking] == row[ranking] for _, other in indexed) > 1)
             if incomplete or tied:
                 assert task["status"] == "needs_input", "未知或并列来源不应静默绑定单个实体"
                 continue
-            key = row["order_id"] if step.bind_field == "order_id" else row["entity_id"]
-            updates = {"source_step": None, "bind_field": None, "source_row": 0}
-            if step.bind_field == "order_id":
-                updates["selected_order_id"] = key
+            updates = {"source_step": None, "bind_field": None, "source_row": 0, "source_partition": None, "bind_mode": "field"}
+            if step.bind_mode == "group":
+                dims = source_plan.group_by or [source_plan.dimension]
+                filters = {f.field: f for f in step.filters}
+                filters.update({f.field: f for f in source_plan.filters})
+                period = source_plan.time_range
+                orders, items = source_plan.order_where, source_plan.item_where
+                for dim in dims:
+                    field = "month" if dim == "month" else dim+"_id" if dim in {"category", "seller"} else dim
+                    value = row[field] if source_plan.group_by else row["entity_id"]
+                    if dim == "month":
+                        year, month = map(int, value.split("-"))
+                        period = TimeRange(start=max(period.start,date(year,month,1)), end=min(period.end,date(year+(month==12),month%12+1,1)))
+                    elif dim in {"category", "seller", "customer_state"} and value is not None:
+                        filters[field] = EntityFilter(field=field, values=[value])
+                    else:
+                        filters.pop(field, None)
+                        condition = Predicate(field=field, operator="is_null" if value is None else "eq", values=[] if value is None else [value])
+                        if dim in {"category", "seller"}:
+                            items = Predicate(children=[items, condition]) if items else condition
+                        else:
+                            orders = Predicate(children=[orders, condition]) if orders else condition
+                for field, condition in (("order_where", orders), ("item_where", items)):
+                    old = getattr(step, field)
+                    updates[field] = Predicate(children=[condition, old]) if condition and old else condition or old
+                updates.update(filters=list(filters.values()), time_range=period, time_field=source_plan.time_field,
+                               order_statuses=source_plan.order_statuses, period_mode="explicit_range", selected_order_id=source_plan.selected_order_id)
             else:
-                updates["filters"] = [f for f in step.filters if f.field != step.bind_field] + [EntityFilter(field=step.bind_field, values=[key])]
+                key = row["order_id"] if step.bind_field == "order_id" else row["entity_id"]
+                if step.bind_field == "order_id":
+                    updates["selected_order_id"] = key
+                else:
+                    updates["filters"] = [f for f in step.filters if f.field != step.bind_field] + [EntityFilter(field=step.bind_field, values=[key])]
             step = step.model_copy(update=updates)
         assert task["status"] == "completed", f"步骤{index+1}未完成：{task['reason']}"
         actual = AnalysisPlan.model_validate(record["plan"])
@@ -61,7 +101,7 @@ def check_workflow_evidence(evidence, expected, oracle):
             assert record["result"] is None
         else:
             result = QueryResult.model_validate(record["result"])
-            check_rows(result, oracle.evaluate(step))
+            check_rows(result, oracle.evaluate(step, with_quality=True))
             for values, qualities in zip(result.rows, result.quality):
                 row = dict(zip(result.columns, values))
                 for metric, quality in qualities.items():
@@ -123,7 +163,7 @@ def evaluate(provider, executor, suite: str, selected: list[str]) -> dict:
                     assert result.status == case.expected_status, f"状态：{result.status} != {case.expected_status}"
                     if result.status == "ok":
                         expected = case.expected_plan.model_copy(update={"metric_ids": actual.metric_ids})
-                        check_rows(result, oracle.evaluate(expected))
+                        check_rows(result, oracle.evaluate(expected, with_quality=True))
                     if case.case_id == "M02":
                         assert evidence["planning_calls"] == 0, "明确年份应由宿主补槽而非重新请求模型"
         except (AssertionError, ValueError, httpx.HTTPError) as error:
@@ -147,7 +187,7 @@ def evaluate(provider, executor, suite: str, selected: list[str]) -> dict:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", choices=[*DATASETS, "all"], default="csv_small")
-    parser.add_argument("--suite", choices=["original", "extended", "all"], default="original")
+    parser.add_argument("--suite", choices=["original", "extended", "joint", "all"], default="original")
     parser.add_argument("--case", action="append", default=[], help="仅运行指定用例；多轮用例会保留整段对话")
     args = parser.parse_args()
     provider = ChatCompletionsProvider()

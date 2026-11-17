@@ -16,6 +16,7 @@ from app.source import SCHEMA, PRIMARY_KEYS
 from app.sql_compiler import compile_query
 from app.sql_audit import audit_query
 from app.sql_guard import validate_sql
+from app.grouping import dimensions, entity_sql, result_columns
 
 DIFF_VERSION = "snapshot-diff-v1"
 ADDITIVE = {"sales", "payment_amount", "order_count", "repeat_customers"}
@@ -90,30 +91,26 @@ def value_state(row, metric):
 
 
 def scope_contract(plan):
-    return {name: plan.model_dump(mode="json")[name] for name in
-            ("dimension", "time_field", "time_range", "comparison_range", "order_statuses", "filters",
-             "order_where", "item_where", "selected_order_id", "metric_ids", "min_group_count")}
+    return {"group_by": list(dimensions(plan)), **{name: plan.model_dump(mode="json")[name] for name in
+            ("time_field", "time_range", "comparison_range", "order_statuses", "filters",
+             "order_where", "item_where", "selected_order_id", "metric_ids", "min_group_count")}}
 
 
 def member_projection(plan, metric):
     from app.facts import scope_ctes
     ctes, parameters = scope_ctes(plan)
-    if plan.dimension in {"category", "seller"}:
-        entity = "i.category_id" if plan.dimension == "category" else "i.seller_id"
-    else:
-        entity = {"total": "'all'", "month": f"strftime(o.{plan.time_field},'%Y-%m')",
-                  "customer_state": "o.customer_state", "delivery_status": "CASE WHEN o.delivered_at IS NULL OR o.estimated_delivery_at IS NULL THEN 'unknown' WHEN o.delivered_at>o.estimated_delivery_at THEN 'delayed' ELSE 'on_time' END"}[plan.dimension]
+    entity, _ = entity_sql(plan)
     if metric == "sales":
         sql = f"""SELECT i.order_id,i.order_item_id,{entity} AS entity_id,i.price AS value,
             (o.scope_match AND i.item_match) AS member
             FROM items i JOIN scoped_orders o ON o.order_id=i.order_id"""
     else:
         # 订单在一个商品分组内只计一次；组内明细的存在条件保留 UNKNOWN。
-        if plan.dimension in {"category", "seller"}:
-            ctes.append(f"""groups AS (SELECT order_id,{entity} AS entity_id,
+        if set(dimensions(plan)) & {"category", "seller"}:
+            ctes.append(f"""groups AS (SELECT i.order_id,{entity} AS entity_id,
                 CASE WHEN COUNT(*) FILTER (WHERE item_match)>0 THEN TRUE
                      WHEN COUNT(*) FILTER (WHERE item_match IS NULL)>0 THEN NULL ELSE FALSE END AS member
-                FROM items i GROUP BY order_id,entity_id)""")
+                FROM items i JOIN scoped_orders o ON o.order_id=i.order_id GROUP BY i.order_id,entity_id)""")
             entity, join, member = "g.entity_id", "JOIN groups g ON g.order_id=o.order_id", "o.scope_match AND g.member"
         else:
             join, member = "", "o.scope_match"
@@ -125,13 +122,11 @@ def member_projection(plan, metric):
 def review_samples(conn, plan, statements):
     from app.facts import scope_ctes
     ctes, parameters = scope_ctes(plan)
-    if plan.dimension in {"category", "seller"}:
-        field = "category_id" if plan.dimension == "category" else "seller_id"
-        ctes.append(f"groups AS (SELECT order_id,{field} AS entity_id,CASE WHEN COUNT(*) FILTER (WHERE item_match)>0 THEN TRUE WHEN COUNT(*) FILTER (WHERE item_match IS NULL)>0 THEN NULL ELSE FALSE END AS member FROM items GROUP BY order_id,{field})")
+    entity, _ = entity_sql(plan)
+    if set(dimensions(plan)) & {"category", "seller"}:
+        ctes.append(f"groups AS (SELECT i.order_id,{entity} AS entity_id,CASE WHEN COUNT(*) FILTER (WHERE item_match)>0 THEN TRUE WHEN COUNT(*) FILTER (WHERE item_match IS NULL)>0 THEN NULL ELSE FALSE END AS member FROM items i JOIN scoped_orders o ON o.order_id=i.order_id GROUP BY i.order_id,entity_id)")
         entity, join, member = "g.entity_id", "JOIN groups g ON g.order_id=o.order_id", "o.scope_match AND g.member"
     else:
-        entity = {"total": "'all'", "month": f"strftime(o.{plan.time_field},'%Y-%m')", "customer_state": "o.customer_state",
-            "delivery_status": "CASE WHEN o.delivered_at IS NULL OR o.estimated_delivery_at IS NULL THEN 'unknown' WHEN o.delivered_at>o.estimated_delivery_at THEN 'delayed' ELSE 'on_time' END"}[plan.dimension]
         join, member = "", "o.scope_match"
     sql = "WITH " + ",".join(ctes) + f""" SELECT {entity} AS entity_id,
         COUNT(r.review_score) FILTER (WHERE {member}) AS reviewed_orders,
@@ -266,7 +261,7 @@ def compare_snapshots(paths, plans, directory, comparable=True):
         display_sets = []
         for conn, plan, log in zip(conns, plans, statements):
             display_sets.append({canonical(r.get("entity_id", "all")) for r in read_analysis(conn, plan, log)}
-                                if plan.intent == "rank" or plan.min_group_count > 1 else None)
+                                if plan.intent in {"rank", "contribution"} or plan.min_group_count > 1 else None)
         period_results = {}
         for role in ("current", "previous"):
             if role == "previous" and not all(plan.comparison_range for plan in plans):
@@ -289,7 +284,9 @@ def compare_snapshots(paths, plans, directory, comparable=True):
                     delta = numeric_delta(before["value"], after["value"]) if comparable else None
                     bridge = memberships.get(metric, {}).get(entity)
                     reconciled = None if not comparable or delta is None or not bridge or bridge["delta"] is None else delta == bridge["delta"]
-                    result = {"period": role, "entity_id": entity, "metric": metric, "before": before, "after": after,
+                    result = {"period": role, "entity_id": entity, "entity_name": (a or b).get("entity_name", "全站"),
+                        "group_values": {column: (a or b)[column] for column in result_columns(plans[0] if a is not None else plans[1])},
+                        "metric": metric, "before": before, "after": after,
                         "delta": delta, "comparable": comparable, "membership": bridge, "reconciled": reconciled,
                         "displayed_before": key in display_sets[0] if display_sets[0] is not None else a is not None,
                         "displayed_after": key in display_sets[1] if display_sets[1] is not None else b is not None,
@@ -297,12 +294,12 @@ def compare_snapshots(paths, plans, directory, comparable=True):
                         "samples_after": {k: v for k, v in (b or {}).items() if k in {"sample_orders", "delayed_orders", "reviewed_orders"}} | sample_maps[1].get(entity, {})}
                     period_results[(role, key, metric)] = result
                     report["metric_comparisons"].append(result)
-        if all(p.comparison_range for p in plans) and plans[0].dimension != "month":
+        if all(p.comparison_range for p in plans) and "month" not in dimensions(plans[0]):
             for key, metric in {(key, metric) for _, key, metric in period_results if metric in ADDITIVE}:
                 for role in ("current", "previous"):
                     if (role, key, metric) not in period_results:
                         other = period_results[("previous" if role == "current" else "current", key, metric)]
-                        absent = {"period": role, "entity_id": other["entity_id"], "metric": metric,
+                        absent = {"period": role, "entity_id": other["entity_id"], "entity_name": other["entity_name"], "group_values": other["group_values"], "metric": metric,
                             "before": value_state(None, metric), "after": value_state(None, metric),
                             "displayed_before": other["displayed_before"], "displayed_after": other["displayed_after"],
                             "delta": Decimal(0) if comparable else None, "comparable": comparable, "membership": None, "reconciled": None}

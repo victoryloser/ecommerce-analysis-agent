@@ -23,7 +23,7 @@
 
 data/sessions.sqlite3 保存对话、成功计划、待澄清状态、下钻路径及 SQL 草稿。恢复时核对数据版本，每次查询重新授权。备份同时保留 data/ 和 runs/，后者含会话引用的证据；上传数据属于业务状态。
 
-pending_plan 与 last_successful_plan 分离，澄清或执行失败不覆盖成功分析。模型上下文使用结构化状态、结果摘要及近期消息，默认最多 48,000 UTF-8 字节，每轮模型与工具合计最多 8 次调用。
+pending_plan 与 last_successful_plan 分离，澄清或执行失败不覆盖成功分析。模型上下文使用结构化状态、结果摘要及近期消息，默认最多 48,000 UTF-8 字节，每轮模型与工具合计最多 11 次调用。
 
 ## 下钻与 SQL
 
@@ -46,6 +46,14 @@ SQL 可访问原始表或上次完整分析结果。后者重新编译成功计�
 `scripts/build_release.py` 仅打包代码和文档，不包含 `material/` 或数据文件；`scripts/verify_release.py` 在干净环境运行测试，并记录缺少本地样例导致的跳过项。
 
 ## 自动测试
+
+联合维度入口使用 `AnalysisPlan.group_by`，旧 `dimension` 保持兼容。`grouping.py` 统一复合身份和字段投影；`facts.py` 按“订单 × 组合”形成事实。`rank_within` 控制排名分区，`contribution_within` 可指定品类内贡献，`contribution_direction` 选择增长或下降排序。工作流通过 `bind_mode="group"` 引用整组；来源有多个父分区时须指定 `source_partition`。
+
+`tests/test_joint_analysis.py` 使用临时构造数据，覆盖真实组合、重复订单、冲突传播、未知排名、贡献分母、同名 ID、组合下钻、会话恢复和跨快照比较，并用独立原始数据基准核对数值及质量字段。运行 `python -m pytest tests/test_joint_analysis.py -q` 可单独回归。
+
+安装下文的可选 Playwright 后，运行 `python scripts/check_p2_ui.py` 可用本机 Edge 检查真实图表点击、完整组合条件、返回上层与月度多序列。此脚本使用临时数据、隔离会话及固定模型响应，不调用模型服务。
+
+真实模型联合分析验收命令为 `python -m app.evaluate --dataset csv_small --suite joint`，需要本地历史样例及模型配置，会调用所配置的模型服务。新增 J01—J06 共六个场景，`--suite all` 共 54 个场景；离线测试通过不能代替真实模型或正式复赛数据验收。
 
 `.github/workflows/ci.yml` 在 push、pull_request 或手动触发时运行，测试矩阵为 Python 3.11、Ubuntu 和 Windows。工作流安装锁定依赖、检查依赖一致性、运行离线 pytest，并构建源码包。Junit 测试报告作为 Actions artifact 保留七天。
 

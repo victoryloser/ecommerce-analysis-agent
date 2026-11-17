@@ -17,6 +17,7 @@ Analyze ecommerce operations through natural-language questions. Explore product
 | Feature | What you can do |
 |---|---|
 | Natural-language queries | Describe metrics, dates, and filters to get tables and charts |
+| Joint dimensions | Analyze category × seller or month × category, rank within groups with ties, and drill into the complete combination |
 | Follow-up analysis | Refine a question, supply a missing year, or click a group to inspect its details |
 | History and exports | Restore local sessions and download the current page or complete query results |
 | SQL workspace | Run read-only SQL against source tables or the complete result of a previous analysis |
@@ -24,6 +25,8 @@ Analyze ecommerce operations through natural-language questions. Explore product
 | Snapshot comparison | Compare a fixed scope or replay the analysis intent; inspect revisions, membership changes, quality transitions, and a complete evidence bundle |
 
 Snapshot comparison is available in the “换数据重算” panel. Select a target snapshot and choose either a fixed scope or intent replay, then compare and download the evidence bundle. Failed comparisons can resume from the last completed stage. Rebuilding built-in samples preserves earlier snapshots.
+
+Try “Rank the top three sellers within each category by product sales, retaining ties” or “Show monthly product sales by category.” Category × seller also supports period comparisons and growth or decline contributions with global and category denominators. Order counts and reviews cannot be summed across overlapping groups. Joint payment allocation and repeat-customer metrics are unsupported; see the [metric definitions (Chinese)](docs/metrics.md).
 
 ## Screenshots
 

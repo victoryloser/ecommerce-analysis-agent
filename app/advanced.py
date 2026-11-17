@@ -3,10 +3,11 @@ import sqlglot
 
 from app.models import AnalysisPlan
 from app.sql_compiler import CompiledQuery
+from app.grouping import dimensions, result_columns, KEY_COLUMNS
 
 
 def extended(plan: AnalysisPlan) -> bool:
-    return (plan.intent in {"contribution", "details", "diagnose"} or plan.time_field != "purchase_at"
+    return (bool(plan.group_by) or plan.intent in {"contribution", "details", "diagnose"} or plan.time_field != "purchase_at"
             or plan.order_statuses != ["delivered"] or plan.order_where is not None or plan.item_where is not None
             or plan.selected_order_id is not None or (plan.intent == "compare" and (plan.dimension != "total" or len(plan.metric_ids) != 1)))
 
@@ -22,8 +23,9 @@ def comparison(plan: AnalysisPlan) -> CompiledQuery:
         metrics.append("order_count")
     current = aggregate(plan.model_copy(update={"intent": "aggregate", "comparison_range": None, "min_group_count": 1, "metric_ids": metrics}))
     previous = aggregate(plan.model_copy(update={"intent": "aggregate", "time_range": plan.comparison_range, "comparison_range": None, "min_group_count": 1, "metric_ids": metrics}))
-    grouping = plan.dimension != "total"
+    grouping = bool(dimensions(plan))
     projections = ["COALESCE(c.entity_id,p.entity_id) AS entity_id", "COALESCE(c.entity_name,p.entity_name) AS entity_name"] if grouping else []
+    projections += [f"COALESCE(c.{col},p.{col}) AS {col}" for col in result_columns(plan)]
     additive = {"sales", "order_count", "payment_amount", "repeat_customers"}
     for metric in plan.metric_ids:
         c = f"CASE WHEN c.__quality IS NULL THEN 0 ELSE c.{metric} END" if grouping and metric in additive else f"c.{metric}"
@@ -35,18 +37,25 @@ def comparison(plan: AnalysisPlan) -> CompiledQuery:
     projections.append(f"json_object({','.join(quality_fields)}) AS __quality")
     if plan.min_group_count > 1:
         projections += ["CASE WHEN c.__quality IS NULL THEN 0 ELSE c.order_count END AS current_orders", "CASE WHEN p.__quality IS NULL THEN 0 ELSE p.order_count END AS previous_orders"]
-    join = "FULL OUTER JOIN previous p ON c.entity_id IS NOT DISTINCT FROM p.entity_id" if grouping else "CROSS JOIN previous p"
+        possible = [f"(COALESCE(CAST(json_extract({side}.__quality,'$.order_count.known_value') AS BIGINT),0)+COALESCE(CAST(json_extract({side}.__quality,'$.order_count.membership_unknown_count') AS BIGINT),0)>={plan.min_group_count})" for side in ("c", "p")]
+        projections.append("(" + " AND ".join(possible) + ") AS __eligible")
+    keys = [KEY_COLUMNS[d] for d in dimensions(plan)] if plan.group_by else ["entity_id"]
+    join = "FULL OUTER JOIN previous p ON " + " AND ".join(f"c.{key} IS NOT DISTINCT FROM p.{key}" for key in keys) if grouping else "CROSS JOIN previous p"
     sql = f"WITH current AS ({current.sql}), previous AS ({previous.sql}), changes AS (SELECT {','.join(projections)} FROM current c {join}) "
+    threshold = " WHERE __eligible" if plan.min_group_count > 1 else ""
+    excluded = " EXCLUDE (__eligible)" if plan.min_group_count > 1 else ""
     if plan.intent == "contribution":
         metric = plan.metric_ids[0]
-        sql += f", contributions AS (SELECT *, (CASE WHEN COUNT(*) OVER ()=COUNT({metric}_change) OVER () THEN SUM({metric}_change) OVER () END) AS total_change, CAST({metric}_change AS DOUBLE)/NULLIF((CASE WHEN COUNT(*) OVER ()=COUNT({metric}_change) OVER () THEN SUM({metric}_change) OVER () END),0) AS contribution_rate FROM changes) SELECT * FROM contributions"
-        if plan.min_group_count > 1:
-            sql += f" WHERE (current_orders>={plan.min_group_count} OR current_orders IS NULL) AND (previous_orders>={plan.min_group_count} OR previous_orders IS NULL)"
-        sql += f" ORDER BY {metric}_change DESC, entity_id"
+        total = f"CASE WHEN COUNT(*) OVER ()=COUNT({metric}_change) OVER () THEN SUM({metric}_change) OVER () END"
+        fields = [f"({total}) AS total_change", f"CAST({metric}_change AS DOUBLE)/NULLIF(({total}),0) AS contribution_rate"]
+        partition = f"PARTITION BY {KEY_COLUMNS[plan.contribution_within]} " if plan.contribution_within else ""
+        if partition:
+            subtotal = f"CASE WHEN COUNT(*) OVER ({partition})=COUNT({metric}_change) OVER ({partition}) THEN SUM({metric}_change) OVER ({partition}) END"
+            fields += [f"({subtotal}) AS parent_change", f"CAST({metric}_change AS DOUBLE)/NULLIF(({subtotal}),0) AS parent_contribution_rate"]
+        direction = "ASC" if plan.contribution_direction == "decrease" else "DESC"
+        sql += f", contributions AS (SELECT *,{','.join(fields)} FROM changes), eligible AS (SELECT *{excluded} FROM contributions{threshold}), ranked AS (SELECT *,CASE WHEN COUNT(*) OVER ({partition})=COUNT({metric}_change) OVER ({partition}) THEN RANK() OVER ({partition}ORDER BY {metric}_change {direction} NULLS LAST) END AS __rank FROM eligible) SELECT * EXCLUDE (__rank) FROM ranked WHERE __rank<={plan.top_n} OR __rank IS NULL ORDER BY {metric}_change {direction} NULLS LAST,entity_id"
     else:
-        sql += "SELECT * FROM changes"
-        if plan.min_group_count > 1:
-            sql += f" WHERE (current_orders>={plan.min_group_count} OR current_orders IS NULL) AND (previous_orders>={plan.min_group_count} OR previous_orders IS NULL)"
+        sql += f"SELECT *{excluded} FROM changes{threshold}"
         sql += " ORDER BY entity_id" if grouping else ""
     return CompiledQuery(sql, current.parameters + previous.parameters)
 

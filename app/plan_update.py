@@ -34,18 +34,31 @@ def expand_periods(plan, manifest):
     return plan.model_copy(update=changes)
 
 
-def apply_update(plan: AnalysisPlan, update: PlanUpdate, manifest: dict) -> AnalysisPlan:
+def apply_update(plan: AnalysisPlan, update: PlanUpdate, manifest: dict, tasks=None) -> AnalysisPlan:
     if plan.intent == "workflow":
         if update.target_step is None or update.target_step > len(plan.steps):
             raise PlanError("请指定要修改的工作流步骤")
         steps = list(plan.steps)
-        steps[update.target_step-1] = apply_update(steps[update.target_step-1], update, manifest)
+        index = update.target_step-1
+        step = steps[index]
+        if step.bind_mode == "group" and update.operation != "reset" and update.field in {"category_id", "seller_id", "customer_state", "time_range", "time_field", "order_statuses", "order_where", "item_where", "order_id"}:
+            from app.workflow import bind_step
+            if tasks is None:
+                raise PlanError("修改组合条件需要已绑定的任务记录")
+            bound = tasks[index]["evidence"].get("plan")
+            if bound and bound["source_step"] is None:
+                step = AnalysisPlan.model_validate(bound)
+            else:
+                step, _, reason = bind_step(step, tasks)
+                if step is None:
+                    raise PlanError(reason)
+        steps[index] = apply_update(step, update, manifest)
         return plan.model_copy(update={"steps": steps})
     field = update.field
     changes = {}
     if update.operation == "reset":
         changes = {"filters": [], "order_where": None, "item_where": None, "selected_order_id": None,
-                   "source_step": None, "bind_field": None, "source_row": 0}
+                   "source_step": None, "bind_field": None, "source_row": 0, "source_partition": None, "bind_mode": "field"}
     elif field in {"order_where", "item_where"}:
         changes[field] = update.predicate if update.operation == "set" else None
         if update.predicate:
@@ -65,10 +78,19 @@ def apply_update(plan: AnalysisPlan, update: PlanUpdate, manifest: dict) -> Anal
                 changes.update(intent="aggregate", comparison_range=None)
             elif plan.intent not in {"compare", "contribution"}:
                 changes["intent"] = "compare"
-    elif field in {"dimension", "metric_ids", "order_statuses", "time_field"}:
+    elif field == "group_by":
+        changes.update(dimension="total", group_by=update.values if update.operation == "set" else [],
+                       rank_within=None, contribution_within=None)
+    elif field in {"rank_within", "contribution_within", "source_partition"}:
+        if update.operation == "set" and len(update.values) != 1:
+            raise PlanError(f"{field} 需要一个值")
+        changes[field] = update.values[0] if update.operation == "set" else None
+    elif field in {"dimension", "metric_ids", "order_statuses", "time_field", "contribution_direction"}:
         if update.operation != "set" or not update.values:
             raise PlanError(f"{field} 需要提供替换值")
         changes[field] = update.values if field in {"metric_ids", "order_statuses"} else update.values[0]
+        if field == "dimension":
+            changes.update(group_by=None, rank_within=None, contribution_within=None)
     elif field:
         changes = {"filters": [f for f in plan.filters if f.field != field],
                    "order_where": remove_field(plan.order_where, field),

@@ -1,11 +1,13 @@
 """表格、图表和导出共用当前查询证据，不重复查询或调用模型。"""
 import csv
 import json
+from datetime import date
 from dataclasses import dataclass, field
 
 from app.answers import LABELS, cell, label, plan_label
 from app.config import RUNS_DIR
 from app.models import AnalysisPlan, QueryResult
+from app.grouping import dimensions
 
 
 @dataclass
@@ -15,6 +17,7 @@ class ResultView:
     chart: list[dict] = field(default_factory=list)
     chart_kind: str | None = None
     chart_title: str = ""
+    chart_series: str | None = None
     csv_file: str | None = None
     evidence_file: str | None = None
 
@@ -76,18 +79,38 @@ def present(evidence: dict, metric: str | None = None) -> ResultView:
         view.chart_kind = "bar"
         view.chart_title = label(metric) + "（自定义探索，当前页）"
         return view
-    if plan.intent in {"details"} or (plan.dimension == "total" and plan.intent != "diagnose"):
+    if plan.intent in {"details"} or (not dimensions(plan) and plan.intent != "diagnose"):
         return view
     candidates = [c for c in result.columns if c in plan.metric_ids or c.endswith(("_current", "_previous", "_change", "_rate")) or c in {"issue_count", "difference", "z_score"}]
     if not candidates:
         return view
     metric = metric if metric in candidates else (plan.metric_ids[0] if plan.metric_ids and plan.metric_ids[0] in candidates else candidates[0])
     ratio = metric in {"delay_rate", "low_score_rate", "contribution_rate"} or metric.endswith("_rate")
+    if plan.group_by and "month" in dimensions(plan):
+        view.chart_series = "品类"
+        months = []
+        current = plan.time_range.start.replace(day=1)
+        while current < plan.time_range.end:
+            months.append(current.strftime("%Y-%m"))
+            current = date(current.year + (current.month == 12), current.month % 12 + 1, 1)
+        data = [dict(zip(result.columns, values)) for values in result.rows]
+        series = {r["category_id"]: r["category_name"] for r in data}
+        points = {(r["month"], r["category_id"]): r for r in data}
+        for category, name in series.items():
+            for month in months:
+                row = points.get((month, category))
+                value = row[metric] if row else None
+                view.chart.append({"分组": month, "品类": f"{name if name is not None else '未标注'} [{category}]",
+                    "数值": float(value)*(100 if ratio else 1) if value is not None else None,
+                    "分组ID": row["entity_id"] if row else None})
+        view.chart_kind = "line"
+        view.chart_title = label(metric) + "（按月、按品类；未显示或未确认的组合留空）"
+        return view
     for values in result.rows:
         row = dict(zip(result.columns, values))
         group_name = str(row["entity_name"]) if row["entity_name"] is not None else "未标注"
         if row[metric] is not None:
-            view.chart.append({"分组": group_name, "数值": float(row[metric]) * (100 if ratio else 1)})
+            view.chart.append({"分组": group_name, "数值": float(row[metric]) * (100 if ratio else 1), **({"分组ID": row["entity_id"]} if plan.group_by else {})})
         else:
             view.chart.append({"分组": group_name + "（未知/不可计算）", "数值": None})
     view.chart_kind = "line" if plan.dimension == "month" else "bar"

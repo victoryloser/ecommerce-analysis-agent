@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 DatasetId = str
 MetricId = Literal["sales", "order_count", "delay_rate", "avg_review", "low_score_rate", "repeat_customers", "payment_amount"]
 Dimension = Literal["total", "month", "category", "seller", "delivery_status", "customer_state"]
+GroupDimension = Literal["month", "category", "seller", "delivery_status", "customer_state"]
 AnalysisIntent = Literal["aggregate", "rank", "compare", "contribution", "details", "diagnose", "join_example"]
 
 
@@ -46,7 +47,7 @@ class Predicate(Contract):
 
 class PlanUpdate(Contract):
     operation: Literal["set", "remove", "reset"]
-    field: Literal["category_id", "seller_id", "customer_state", "product_id", "price", "freight_value", "order_sales", "order_freight", "payment_amount", "review_score", "order_id", "time_range", "comparison_range", "dimension", "metric_ids", "order_statuses", "time_field", "order_where", "item_where"] | None = None
+    field: Literal["category_id", "seller_id", "customer_state", "product_id", "price", "freight_value", "order_sales", "order_freight", "payment_amount", "review_score", "order_id", "time_range", "comparison_range", "dimension", "group_by", "source_partition", "rank_within", "contribution_within", "contribution_direction", "metric_ids", "order_statuses", "time_field", "order_where", "item_where"] | None = None
     values: list[str | int | float] = Field(default_factory=list)
     predicate: Predicate | None = None
     period: TimeRange | None = None
@@ -62,6 +63,10 @@ class AnalysisPlan(Contract):
     update: PlanUpdate | None = None
     metric_ids: list[MetricId] = Field(default_factory=list)
     dimension: Dimension = "total"
+    group_by: list[GroupDimension] | None = Field(default=None, max_length=2)
+    rank_within: GroupDimension | None = None
+    contribution_within: GroupDimension | None = None
+    contribution_direction: Literal["increase", "decrease"] = "increase"
     time_range: TimeRange | None = None
     comparison_range: TimeRange | None = None
     filters: list[EntityFilter] = Field(default_factory=list)
@@ -88,10 +93,26 @@ class AnalysisPlan(Contract):
     steps: list["AnalysisPlan"] = Field(default_factory=list, max_length=6)
     source_step: int | None = Field(default=None, ge=1, le=6)
     source_row: int = Field(default=0, ge=0)
+    source_partition: str | None = None
     bind_field: Literal["category_id", "seller_id", "customer_state", "order_id"] | None = None
+    bind_mode: Literal["field", "group"] = "field"
     history_query: str | None = None
     history_start: date | None = None
     history_end: date | None = None
+
+    @model_validator(mode="after")
+    def normalize_grouping(self):
+        if self.group_by is not None:
+            if len(set(self.group_by)) != len(self.group_by):
+                raise ValueError("分组维度不能重复")
+            if self.dimension != "total" and self.group_by != [self.dimension]:
+                raise ValueError("group_by 与旧 dimension 冲突")
+            if len(self.group_by) < 2:
+                self.dimension = self.group_by[0] if self.group_by else "total"
+                self.group_by = None
+            else:
+                self.group_by = sorted(self.group_by, key=["month", "category", "seller", "delivery_status", "customer_state"].index)
+        return self
 
 
 class QueryResult(Contract):

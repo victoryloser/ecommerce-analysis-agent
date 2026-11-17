@@ -17,7 +17,7 @@ def numeric_columns(evidence: dict) -> list[str]:
     if not result or result["status"] not in {"ok", "empty"}:
         return []
     return [column for index, column in enumerate(result["columns"])
-            if not column.endswith("_id") and column not in {"entity_name", "rank_no"}
+            if not column.endswith(("_id", "_name")) and column not in {"month", "rank_no"}
             and (any(row[index] is not None for row in result["rows"]) or any(column in q for q in result.get("quality", [])))
             and all(row[index] is None or _number(row[index]) for row in result["rows"])]
 

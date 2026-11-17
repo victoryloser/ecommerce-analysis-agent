@@ -55,7 +55,9 @@ def metric_detail(metric_id: str) -> dict:
     dimensions = ["total", "month", "customer_state"] if metric_id == "repeat_customers" else [d for d in DIMENSIONS if d not in {"seller", "category"}] if metric_id == "payment_amount" else DIMENSIONS
     return {"id": metric_id, **METRIC_DETAILS[metric_id], "expression": EXPRESSIONS[metric_id],
             "required_filter": {"orders.order_status": "delivered"}, "time_field": "orders.purchase_at",
-            "dimensions": dimensions, "rounding": "金额、评分和展示百分比保留2位，HALF_UP；中间金额DECIMAL"}
+            "dimensions": dimensions,
+            "joint_groups": [["category", "seller"], ["month", "category"]] if metric_id not in {"payment_amount", "repeat_customers"} else [],
+            "rounding": "金额、评分和展示百分比保留2位，HALF_UP；中间金额DECIMAL"}
 
 
 def table_detail(table: str) -> dict:
@@ -69,7 +71,8 @@ def required_tables(metric_ids: list[str], dimension: str, filter_fields: list[s
     if intent == "join_example":
         return {"orders", "order_items", "order_payments"}
     tables = {"orders", "customers"}
-    if "sales" in metric_ids or dimension in {"seller", "category"} or set(filter_fields) & {"seller_id", "category_id", "product_id", "price", "freight_value", "order_sales", "order_freight"}:
+    dims = {dimension} if isinstance(dimension, str) else set(dimension)
+    if "sales" in metric_ids or dims & {"seller", "category"} or set(filter_fields) & {"seller_id", "category_id", "product_id", "price", "freight_value", "order_sales", "order_freight"}:
         tables.update({"order_items", "products", "categories", "sellers"})
     if "payment_amount" in metric_ids or "payment_amount" in filter_fields:
         tables.add("order_payments")

@@ -73,7 +73,18 @@ def cases_for(manifest: dict, suite: str) -> list[EvaluationCase]:
         EvaluationCase("B03", "boundary", "按送达日期而不是下单日期统计2025年4月商品销售额。", plan(time_field="delivered_at", time_range=april)),
         EvaluationCase("B04", "isolation", "4月商品销售额多少？", plan(intent="clarify", time_range=None, clarification="请补充年份", missing_slots=["year"], pending_intent="aggregate", month=4), practice=False),
     ]
-    return original if suite == "original" else extended if suite == "extended" else original + extended
+    grouping = ["category", "seller"]
+    leader = plan(intent="rank", group_by=grouping, top_n=1)
+    follow = plan(intent="details", metric_ids=[], source_step=1, bind_mode="group", detail_level="items")
+    joint = [
+        EvaluationCase("J01", "joint", f"{period}，按品类和商家联合汇总已送达商品销售额和去重订单数。", plan(group_by=grouping, metric_ids=["sales", "order_count"])),
+        EvaluationCase("J02", "joint", f"{period}，每个品类内分别按已送达商品销售额列前三商家，保留并列。", plan(intent="rank", group_by=grouping, rank_within="category", top_n=3)),
+        EvaluationCase("J03", "joint", f"{period}，按月份和品类查看已送达商品销售额与订单数。", plan(group_by=["month", "category"], metric_ids=["sales", "order_count"])),
+        EvaluationCase("J04", "joint", "按品类和商家联合比较2025年4月与3月已送达商品销售额，以3月为固定基期。", plan(intent="compare", group_by=grouping, time_range=april, comparison_range=march, comparison_mode="fixed")),
+        EvaluationCase("J05", "joint", "比较2025年4月与3月已送达商品额，各品类内按商家变化额升序展示前三名及并列，同时列出品类内贡献和全范围贡献，以3月为固定基期。", plan(intent="contribution", group_by=grouping, time_range=april, comparison_range=march, comparison_mode="fixed", contribution_within="category", contribution_direction="decrease", top_n=3)),
+        EvaluationCase("J06", "joint", f"{period}，找到已送达商品销售额最高的品类与商家组合，再查看该组合的商品明细；并列时先让我选择。", plan(intent="workflow", metric_ids=[], steps=[leader, follow])),
+    ]
+    return original if suite == "original" else extended if suite == "extended" else joint if suite == "joint" else original + extended + joint
 
 
 def assert_plan(actual: AnalysisPlan, expected: AnalysisPlan) -> None:
@@ -91,9 +102,9 @@ def assert_plan(actual: AnalysisPlan, expected: AnalysisPlan) -> None:
     if expected.intent == "explain":
         assert actual.explanation_topic == expected.explanation_topic
         return
-    for field in ["dataset_id", "metadata_version", "dimension", "time_range", "comparison_range", "min_group_count", "time_field", "order_statuses", "order_where", "item_where", "selected_order_id", "detail_level", "source_step", "bind_field", "source_row"]:
+    for field in ["dataset_id", "metadata_version", "dimension", "group_by", "rank_within", "contribution_within", "contribution_direction", "time_range", "comparison_range", "min_group_count", "time_field", "order_statuses", "order_where", "item_where", "selected_order_id", "detail_level", "source_step", "bind_field", "bind_mode", "source_row", "source_partition", "period_mode", "comparison_mode"]:
         assert getattr(actual, field) == getattr(expected, field), f"{field}: {getattr(actual, field)} != {getattr(expected, field)}"
     assert set(expected.metric_ids) <= set(actual.metric_ids), f"指标：{actual.metric_ids} != {expected.metric_ids}"
     assert {f.field: set(f.values) for f in actual.filters} == {f.field: set(f.values) for f in expected.filters}, "过滤条件不符"
-    if expected.intent == "rank":
+    if expected.intent in {"rank", "contribution"}:
         assert actual.top_n == expected.top_n and actual.metric_ids[0] == expected.metric_ids[0], "排名指标或名次范围不符"

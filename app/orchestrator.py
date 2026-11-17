@@ -117,8 +117,10 @@ class AnalysisAgent:
                         self.save_workflow_progress(session, question, attempts, trace)
                         continue
                     source = session.workflow_tasks[template.source_step-1]["evidence"]
-                    value = step.selected_order_id if template.bind_field == "order_id" else next(f.values for f in step.filters if f.field == template.bind_field)
-                    provenance.update(source_record_id=source["record_id"], source_step=template.source_step, bind_field=template.bind_field, value=value)
+                    value = ({"filters": [f.model_dump() for f in step.filters], "time_range": step.time_range.model_dump(mode="json")}
+                             if template.bind_mode == "group" else step.selected_order_id if template.bind_field == "order_id" else next(f.values for f in step.filters if f.field == template.bind_field))
+                    provenance.update(source_record_id=source["record_id"], source_step=template.source_step, bind_field=template.bind_field,
+                                      bind_mode=template.bind_mode, source_partition=template.source_partition, value=value)
                     trace.record("workflow_bound", **provenance)
                 turn = self.run_plan(session, step, f"{question}（步骤{index+1}）", 0, trace, provenance=provenance)
                 result = turn.evidence.get("result")
@@ -155,7 +157,7 @@ class AnalysisAgent:
         for change in update if isinstance(update, list) else [update]:
             if base.intent == "workflow" and change.target_step is None:
                 change = change.model_copy(update={"target_step": session.focus_step})
-            plan = apply_update(plan, change, self.executors[session.dataset_id].manifest)
+            plan = apply_update(plan, change, self.executors[session.dataset_id].manifest, session.workflow_tasks)
         validate_plan(plan, self.executors[session.dataset_id].manifest)
         with TurnTrace(session.session_id, session.dataset_id, "更新分析条件", "condition-update") as trace:
             if plan.intent == "workflow":

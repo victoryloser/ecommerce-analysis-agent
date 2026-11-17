@@ -28,7 +28,8 @@ def example_questions(manifest):
         if year and "年" not in question:
             question = re.sub(r"(?<!\d)(\d{1,2})月", rf"{year}年\1月", question)
         questions.append(question)
-    return questions or ["全部数据中，已送达订单的商品销售额是多少？", "按月份查看商品销售额和订单量", "按品类查看商品销售额", "查看延迟率最高的商家"]
+    questions = questions or ["全部数据中，已送达订单的商品销售额是多少？", "按月份查看商品销售额和订单量", "按品类查看商品销售额", "查看延迟率最高的商家"]
+    return questions + ["按品类和商家联合列出全期商品销售额及订单数", "全期每个品类分别按商品销售额列出前三商家，保留并列", "按月份和品类查看全期商品销售额趋势"]
 
 
 def build_ui():
@@ -71,13 +72,13 @@ def build_ui():
         if evidence.get("type") == "workflow":
             pending = next((step for step in evidence["plan"]["steps"] if step["intent"] == "clarify"), None)
             options = choices(AnalysisPlan.model_validate(pending), executors[evidence["dataset_id"]].manifest) if pending else []
-        frame = pd.DataFrame(view.chart, columns=["分组", "数值"])
+        frame = pd.DataFrame(view.chart, columns=["分组", "数值", *([view.chart_series] if view.chart_series else [])])
         return (
             gr.Dataframe(value={"headers": view.headers, "data": view.table}, visible=bool(view.headers)),
             gr.BarPlot(value=frame, x="分组", y="数值", y_title=view.chart_title, title=view.chart_title, visible=bool(view.chart) and view.chart_kind == "bar", sort="-y"),
-            gr.LinePlot(value=frame, x="分组", y="数值", y_title=view.chart_title, title=view.chart_title, visible=bool(view.chart) and view.chart_kind == "line", sort="x"),
+            gr.LinePlot(value=frame, x="分组", y="数值", color=view.chart_series, y_title=view.chart_title, title=view.chart_title, visible=bool(view.chart) and view.chart_kind == "line", sort="x"),
             gr.DownloadButton(value=view.csv_file, visible=view.csv_file is not None),
-            gr.DownloadButton(value=view.evidence_file, visible=False),
+            gr.DownloadButton(value=view.evidence_file, visible=view.evidence_file is not None),
             gr.Dropdown(choices=options, value=None, visible=bool(options)),
         )
 

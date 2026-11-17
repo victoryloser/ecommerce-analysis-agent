@@ -3,6 +3,7 @@ from app.models import AnalysisPlan
 from app.predicates import ITEM_FIELDS, ORDER_FIELDS, predicate_sql
 from app.sql_compiler import CompiledQuery
 from app.quality import exact_sum
+from app.grouping import dimensions, entity_sql, joint_projection, result_columns, KEY_COLUMNS
 
 
 def scope_ctes(plan):
@@ -58,10 +59,12 @@ def quality_json(known, value_unknown, membership, affected, known_count, missin
 
 def aggregate(plan: AnalysisPlan) -> CompiledQuery:
     ctes, params = scope_ctes(plan)
-    grouped_items = plan.dimension in {"category", "seller"}
-    entity_columns = ("category_id AS entity_id,category_name_zh AS entity_name," if plan.dimension == "category"
-                      else "seller_id AS entity_id,seller_name AS entity_name,") if grouped_items else ""
-    entity_group = ",entity_id,entity_name" if grouped_items else ""
+    dims = dimensions(plan)
+    grouped_items = bool(set(dims) & {"category", "seller"})
+    item_columns = [c for d in dims if d in {"category", "seller"} for c in
+                    (["category_id", "category_name_zh"] if d == "category" else ["seller_id", "seller_name"])]
+    entity_columns = ",".join(item_columns) + "," if item_columns else ""
+    entity_group = "," + ",".join(item_columns) if item_columns else ""
     ctes.append(f"""entity_items AS (SELECT order_id,{entity_columns}
         COALESCE(SUM(price) FILTER (WHERE item_match),0) AS sales_known,
         COUNT(price) FILTER (WHERE item_match) AS sales_known_count,
@@ -73,12 +76,8 @@ def aggregate(plan: AnalysisPlan) -> CompiledQuery:
     ctes.append(f"""payments AS (SELECT order_id,SUM(payment_value) AS payment_known,
         COUNT(payment_value) AS payment_known_count, COUNT(*)-COUNT(payment_value) AS payment_unknown,
         {exact_sum('payment_value')} AS payment_amount FROM order_payments GROUP BY order_id)""")
-    entity = "i.entity_id,i.entity_name" if grouped_items else {
-        "total": "'all' AS entity_id,'全站' AS entity_name",
-        "month": f"strftime(o.{plan.time_field},'%Y-%m') AS entity_id,strftime(o.{plan.time_field},'%Y-%m') AS entity_name",
-        "customer_state": "o.customer_state AS entity_id,o.customer_state AS entity_name",
-        "delivery_status": "CASE WHEN o.delivered_at IS NULL OR o.estimated_delivery_at IS NULL THEN 'unknown' WHEN o.delivered_at>o.estimated_delivery_at THEN 'delayed' ELSE 'on_time' END AS entity_id,CASE WHEN o.delivered_at IS NULL OR o.estimated_delivery_at IS NULL THEN '时间缺失' WHEN o.delivered_at>o.estimated_delivery_at THEN '延迟' ELSE '准时' END AS entity_name",
-    }[plan.dimension]
+    key, name = entity_sql(plan)
+    entity = ",".join([f"{key} AS entity_id", f"{name} AS entity_name", *joint_projection(plan)])
     match = "o.scope_match AND i.group_match" if grouped_items else "o.scope_match"
     reviews = bool(set(plan.metric_ids) & {"avg_review", "low_score_rate"})
     ctes.append(f"""facts AS (SELECT o.*,{entity},({match}) AS match_state,
@@ -89,8 +88,9 @@ def aggregate(plan: AnalysisPlan) -> CompiledQuery:
         FROM scoped_orders o {'JOIN' if grouped_items else 'LEFT JOIN'} entity_items i ON i.order_id=o.order_id
         LEFT JOIN payments pay ON pay.order_id=o.order_id
         {'LEFT JOIN order_reviews r ON r.order_id=o.order_id' if reviews else ''})""")
-    group = "GROUP BY entity_id,entity_name" if plan.dimension != "total" else ""
-    projection = "entity_id,entity_name," if group else ""
+    group_columns = ["entity_id", "entity_name", *result_columns(plan)]
+    group = "GROUP BY " + ",".join(group_columns) if dims else ""
+    projection = ",".join(group_columns) + "," if group else ""
     n = "COUNT(DISTINCT order_id) FILTER (WHERE match_state)"
     u = "COUNT(DISTINCT order_id) FILTER (WHERE match_state IS NULL)"
     expressions, qualities = [], []
@@ -140,13 +140,14 @@ def aggregate(plan: AnalysisPlan) -> CompiledQuery:
     if source == "facts":
         expressions += [f"{n} AS __orders", f"{u} AS __uncertain_orders"]
     ctes.append(f"aggregated AS (SELECT {projection}{','.join(expressions)} FROM {source} {group})")
-    threshold = f"(__orders>={plan.min_group_count} OR __uncertain_orders>0)" if group and source == "facts" else "TRUE"
+    threshold = f"(__orders+__uncertain_orders>={plan.min_group_count})" if group and source == "facts" else "TRUE"
     exclude = " EXCLUDE (__orders,__uncertain_orders)" if source == "facts" else ""
     if plan.intent == "rank":
         metric = plan.metric_ids[0]
-        # 在门槛及 Top N 之前判断未知候选，不能让未知组消失后宣称冠军。
+        # 门槛只排除确定不合格者；在 Top N 前检查整个排名分区的未知候选。
         uncertain = f"{metric} IS NULL AND json_extract(__quality,'$.{metric}.completeness')<>'\"complete\"'"
-        ctes.append(f"ranked AS (SELECT *,CASE WHEN COUNT(*) FILTER (WHERE {uncertain}) OVER ()=0 THEN RANK() OVER (ORDER BY {metric} DESC NULLS LAST) END AS rank_no FROM aggregated WHERE {threshold})")
+        partition = f"PARTITION BY {KEY_COLUMNS[plan.rank_within]} " if plan.rank_within else ""
+        ctes.append(f"ranked AS (SELECT *,CASE WHEN COUNT(*) FILTER (WHERE {uncertain}) OVER ({partition})=0 THEN RANK() OVER ({partition}ORDER BY {metric} DESC NULLS LAST) END AS rank_no FROM aggregated WHERE {threshold})")
         body = f"SELECT *{exclude} FROM ranked WHERE rank_no<={plan.top_n} OR rank_no IS NULL ORDER BY {metric} DESC NULLS LAST,entity_id"
     else:
         body = f"SELECT *{exclude} FROM aggregated WHERE {threshold}" + (" ORDER BY entity_id" if group else "")
