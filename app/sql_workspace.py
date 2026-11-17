@@ -15,6 +15,7 @@ from app.models import Contract, QueryResult
 from app.query_worker import run_query
 from app.semantic import METRICS, RELATIONSHIPS, validate_plan
 from app.source import SCHEMA
+from app.quality import QUERY_SCHEMA
 from app.sql_audit import audit_query
 from app.sql_compiler import CompiledQuery, compile_query
 from app.sql_guard import EXPLORATION_FUNCTIONS, validate_sql
@@ -36,7 +37,9 @@ def workspace_catalog(session, scope: Scope) -> dict:
         raise ValueError("未知 SQL 数据范围")
     if session.last_result is None or session.last_successful_plan is None:
         raise ValueError("请先完成一次结构化分析，才能查询 analysis_result")
-    return {"scope": scope, "tables": {"analysis_result": {"columns": session.last_result.columns}},
+    return {"scope": scope, "tables": {"analysis_result": {"columns": session.last_result.columns + (["__quality"] if session.last_result.quality else [])}},
+            "quality": session.last_result.quality,
+            "working_plan": session.working_plan.model_dump(mode="json") if session.working_plan else None,
             "source_plan": session.last_successful_plan.model_dump(mode="json"),
             "source_record_id": session.analysis_evidence["record_id"]}
 
@@ -52,11 +55,11 @@ def compile_exploration(session, executor, sql: str, parameters: list, scope: Sc
     validate_plan(plan, executor.manifest)
     base = compile_query(plan)
     from app.advanced import extended
-    validate_sql(base.sql, exploration=extended(plan))
+    validate_sql(base.sql, schema=QUERY_SCHEMA, exploration=extended(plan))
     audit_query(plan, base)
     # 用完整查询作CTE，不能把500行预览误作全量输入。
     base_tree = sqlglot.parse_one(base.sql, read="duckdb")
-    qualified = qualify(base_tree.copy(), dialect="duckdb", schema=SCHEMA, quote_identifiers=False, identify=False)
+    qualified = qualify(base_tree.copy(), dialect="duckdb", schema=QUERY_SCHEMA, quote_identifiers=False, identify=False)
     schema = {"analysis_result": {name: "UNKNOWN" for name in qualified.named_selects}}
     validate_sql(sql, schema=schema, exploration=True)
     tree = sqlglot.parse_one(sql, read="duckdb")
@@ -86,7 +89,7 @@ class SQLWorkspace:
                 "所有输出列使用唯一别名。结果是自定义探索，不声称业务口径认证。"
                 "允许函数：" + ",".join(sorted(EXPLORATION_FUNCTIONS)) +
                 "\nJSON Schema:" + json.dumps(SQLDraft.model_json_schema(), ensure_ascii=False)},
-                {"role": "user", "content": json.dumps({"catalog": catalog, "question": question}, ensure_ascii=False)}]
+                {"role": "user", "content": json.dumps({"catalog": catalog, "question": question}, ensure_ascii=False, default=str)}]
             if len(json.dumps(messages, ensure_ascii=False).encode()) > 48000:
                 raise ValueError("SQL请求超过48000字节上下文预算，请缩小问题范围")
             trace.consume("model")
@@ -133,11 +136,11 @@ class SQLWorkspace:
         plan = session.last_successful_plan
         validate_plan(plan, executor.manifest)
         expected = compile_query(plan)
-        validate_sql(expected.sql, exploration=extended(plan))
+        validate_sql(expected.sql, schema=QUERY_SCHEMA, exploration=extended(plan))
         audit_query(plan, expected)
         actual, _ = compile_exploration(session, executor, sql, parameters, scope)
-        expected_tree = qualify(sqlglot.parse_one(expected.sql, read="duckdb"), dialect="duckdb", schema=SCHEMA, quote_identifiers=False, identify=False)
-        actual_tree = qualify(sqlglot.parse_one(actual.sql, read="duckdb"), dialect="duckdb", schema=SCHEMA, quote_identifiers=False, identify=False)
+        expected_tree = qualify(sqlglot.parse_one(expected.sql, read="duckdb"), dialect="duckdb", schema=QUERY_SCHEMA, quote_identifiers=False, identify=False)
+        actual_tree = qualify(sqlglot.parse_one(actual.sql, read="duckdb"), dialect="duckdb", schema=QUERY_SCHEMA, quote_identifiers=False, identify=False)
         if expected_tree.named_selects != actual_tree.named_selects:
             raise ValueError("核对要求输出列及顺序与参考分析一致")
         query = CompiledQuery(f"""WITH reference AS ({expected.sql}), candidate AS ({actual.sql}),

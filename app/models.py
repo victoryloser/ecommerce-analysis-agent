@@ -44,10 +44,22 @@ class Predicate(Contract):
     negate: bool = False
 
 
+class PlanUpdate(Contract):
+    operation: Literal["set", "remove", "reset"]
+    field: Literal["category_id", "seller_id", "customer_state", "product_id", "price", "freight_value", "order_sales", "order_freight", "payment_amount", "review_score", "order_id", "time_range", "comparison_range", "dimension", "metric_ids", "order_statuses", "time_field", "order_where", "item_where"] | None = None
+    values: list[str | int | float] = Field(default_factory=list)
+    predicate: Predicate | None = None
+    period: TimeRange | None = None
+    period_mode: Literal["explicit_range", "full_coverage"] | None = None
+    comparison_mode: Literal["none", "fixed", "previous_month"] | None = None
+    target_step: int | None = Field(default=None, ge=1, le=6)
+
+
 class AnalysisPlan(Contract):
     dataset_id: DatasetId
     metadata_version: str
-    intent: Literal["aggregate", "rank", "compare", "explain", "clarify", "unsupported", "load_catalog", "join_example", "contribution", "details", "diagnose", "workflow", "history"]
+    intent: Literal["aggregate", "rank", "compare", "explain", "clarify", "unsupported", "load_catalog", "join_example", "contribution", "details", "diagnose", "workflow", "history", "update", "continue"]
+    update: PlanUpdate | None = None
     metric_ids: list[MetricId] = Field(default_factory=list)
     dimension: Dimension = "total"
     time_range: TimeRange | None = None
@@ -71,8 +83,10 @@ class AnalysisPlan(Contract):
     selected_order_id: str | None = None
     diagnosis: Literal["reconciliation", "quality", "sales_spike", "seller_outlier"] = "reconciliation"
     diagnostic_threshold: float | None = Field(default=None, ge=0)
-    steps: list["AnalysisPlan"] = Field(default_factory=list, max_length=4)
-    source_step: int | None = Field(default=None, ge=1, le=4)
+    period_mode: Literal["explicit_range", "full_coverage"] = "explicit_range"
+    comparison_mode: Literal["none", "fixed", "previous_month"] = "none"
+    steps: list["AnalysisPlan"] = Field(default_factory=list, max_length=6)
+    source_step: int | None = Field(default=None, ge=1, le=6)
     source_row: int = Field(default=0, ge=0)
     bind_field: Literal["category_id", "seller_id", "customer_state", "order_id"] | None = None
     history_query: str | None = None
@@ -91,3 +105,11 @@ class QueryResult(Contract):
     row_offset: int = 0
     export_file: str | None = None
     row_count: int | None = None
+    quality: list[dict] = Field(default_factory=list)
+
+
+class ComparisonRequest(Contract):
+    target_dataset_id: str
+    mode: Literal["fixed_scope", "intent_replay"] = "fixed_scope"
+    source: Literal["current_result", "working_plan"] = "current_result"
+    source_record_id: str | None = None

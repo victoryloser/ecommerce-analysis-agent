@@ -34,13 +34,15 @@ def main():
     from app.oracle import SourceOracle, check_rows
     from app.demo import practice_plans
     from app.semantic import load_manifest
+    from app.snapshots import resolve_dataset
+    dataset = resolve_dataset("excel_full")
     from app.config import DATASETS
     from check_p1_live import check_shares
     from check_extended_live import check_contribution
     from check_clarification_live import check_details
 
     report = {'created_at': datetime.now(timezone.utc).isoformat(), 'status': 'recording',
-              'mode': 'real-browser-real-model', 'dataset_id': 'excel_full',
+              'mode': 'real-browser-real-model', 'dataset_id': dataset,
               'dataset_selector': 'Official DATASETS IDs and display names; uploaded datasets excluded from this demonstration',
               'implementation_sha256': hashlib.sha256(b''.join(p.name.encode()+p.read_bytes() for p in sorted((ROOT/'app').glob('*.py')))).hexdigest(),
               'steps': [], 'events': [], 'model_calls': [], 'page_errors': []}
@@ -86,11 +88,11 @@ def main():
     ui.ChatCompletionsProvider = TrackedProvider
     ui.AnalysisAgent = TrackedAgent
     ui.SQLWorkspace = TrackedWorkspace
-    ui.registered_datasets = lambda: dict(DATASETS)
+    ui.registered_datasets = lambda: {resolve_dataset(k): v for k, v in DATASETS.items()}
     store = SessionStore(runtime/'sessions.sqlite3')
     ui.SessionStore = lambda: store
-    oracle = SourceOracle('excel_full')
-    plans = practice_plans(load_manifest('excel_full'))
+    oracle = SourceOracle(dataset)
+    plans = practice_plans(load_manifest(dataset))
     demo = ui.build_ui()
     try:
         demo.launch(server_name='127.0.0.1', server_port=args.port, prevent_thread_lock=True, quiet=True)
@@ -201,12 +203,12 @@ def main():
                 page.wait_for_timeout(1700)
                 page.get_by_text('历史会话',exact=True).click()
                 page.get_by_label('选择会话',exact=True).click()
-                session_title=next(row['title'] for row in store.list('excel_full') if row['session_id']==session_id)
+                session_title=next(row['title'] for row in store.list(dataset) if row['session_id']==session_id)
                 page.get_by_role('option').filter(has_text=session_title).first.click()
                 page.get_by_role('button',name='继续分析',exact=True).click()
                 page.get_by_text('本轮查询结果',exact=True).wait_for(timeout=15000)
                 table_view('06-restored')
-                restored=store.load(session_id,load_manifest('excel_full'))
+                restored=store.load(session_id,load_manifest(dataset))
                 assert restored.last_evidence['record_id']==sql_evidence['record_id']
 
                 scene('06 统一澄清｜补年份后继续依赖工作流')

@@ -9,6 +9,7 @@ from app.session import Session
 from app.sql_compiler import CompiledQuery
 from app.trace import TurnTrace
 from app.semantic import get_catalog
+from app.snapshots import implementation_hash
 
 
 def write_evidence(session: Session, manifest: dict, question: str, plan: AnalysisPlan, model: str,
@@ -22,6 +23,8 @@ def write_evidence(session: Session, manifest: dict, question: str, plan: Analys
         "source_hashes": manifest["sources"], "schema_sha256": manifest["schema_sha256"],
         "metadata_sha256": manifest["metadata_sha256"],
         "database_sha256": manifest["database_sha256"], "question": question,
+        "quality_rule_version": manifest.get("quality_rule_version"),
+        "implementation_sha256": implementation_hash(),
         "model": model, "planning_calls": attempts, "plan": plan.model_dump(mode="json"),
         "sql": compiled.sql if compiled else None, "parameters": compiled.parameters if compiled else None,
         "result": result.model_dump() if result else None,
@@ -32,7 +35,7 @@ def write_evidence(session: Session, manifest: dict, question: str, plan: Analys
     if provenance:
         record["provenance"] = provenance
     if result:
-        serialized = json.dumps({"columns": result.columns, "rows": result.rows}, ensure_ascii=False, default=str, sort_keys=True)
+        serialized = json.dumps({"columns": result.columns, "rows": result.rows, "quality": result.quality}, ensure_ascii=False, default=str, sort_keys=True)
         record["result_sha256"] = hashlib.sha256(serialized.encode()).hexdigest()
     directory = RUNS_DIR / session.dataset_id
     directory.mkdir(parents=True, exist_ok=True)
@@ -48,6 +51,8 @@ def write_artifact(session: Session, manifest: dict, kind: str, question: str, p
               "source_hashes": manifest["sources"], "metadata_sha256": manifest["metadata_sha256"],
               "turn_id": trace.turn_id, "event_file": str(trace.event_file.relative_to(RUNS_DIR)),
               "calls_used": trace.steps, **payload}
+    record.update(database_sha256=manifest["database_sha256"], quality_rule_version=manifest.get("quality_rule_version"))
+    record["implementation_sha256"] = implementation_hash()
     directory = RUNS_DIR / session.dataset_id
     directory.mkdir(parents=True, exist_ok=True)
     text = json.dumps(record, ensure_ascii=False, default=str, indent=2)

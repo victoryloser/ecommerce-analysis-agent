@@ -10,6 +10,10 @@ import httpx
 from app.config import RUNS_DIR
 
 
+class BudgetError(ValueError):
+    pass
+
+
 @dataclass
 class TurnTrace:
     session_id: str
@@ -19,6 +23,8 @@ class TurnTrace:
     turn_id: str = field(default_factory=lambda: uuid4().hex)
     steps: int = 0
     model_calls: int = 0
+    catalog_calls: int = 0
+    query_calls: int = 0
     sequence: int = 0
     stage: str = "start"
 
@@ -36,11 +42,17 @@ class TurnTrace:
             handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
     def consume(self, kind: str):
-        if self.steps >= 8:
-            raise ValueError("本轮已达到8次模型/元数据/查询调用上限")
+        limits = {"model": (self.model_calls, 4), "catalog": (self.catalog_calls, 1), "query": (self.query_calls, 6)}
+        used, limit = limits.get(kind, (0, 11))
+        if self.steps >= 11 or used >= limit:
+            raise BudgetError(f"本轮调用预算已用完：{kind} 上限{limit}，总上限11；已完成结果保留，可继续未完成任务")
         self.steps += 1
         if kind == "model":
             self.model_calls += 1
+        elif kind == "catalog":
+            self.catalog_calls += 1
+        elif kind == "query":
+            self.query_calls += 1
         self.record("budget", kind=kind, steps=self.steps, model_calls=self.model_calls)
 
     def __enter__(self):

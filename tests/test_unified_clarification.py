@@ -134,7 +134,7 @@ def test_new_intents_bind_unique_names_and_keep_literal_predicates(executor):
         validate_plan(bound, manifest)
 
 
-def test_workflow_collects_slots_before_execution_and_restores_dependencies(executor, monkeypatch, tmp_path):
+def test_workflow_executes_ready_steps_and_restores_dependencies(executor, monkeypatch, tmp_path):
     manifest, first, second = duplicate_sellers(executor.manifest)
     monkeypatch.setattr(executor, "manifest", manifest)
     first_plan = analysis(manifest, "contribution").model_copy(update={"filters": [EntityFilter(field="seller_id", values=[first])]})
@@ -148,7 +148,8 @@ def test_workflow_collects_slots_before_execution_and_restores_dependencies(exec
     session = Session(workflow.dataset_id)
     agent = AnalysisAgent(provider, {session.dataset_id: executor}, store)
     pending = agent.respond(session, "同名商家4月比3月各品类增长贡献，查最高品类订单，再做4月质量诊断并解释关联")
-    assert pending.evidence["type"] == "clarify" and "步骤1" in pending.text
+    assert pending.evidence["type"] == "workflow" and "步骤1" in pending.text
+    assert session.workflow_tasks[3]["status"] == "completed"
     assert ("2025年", "2025年") in choices(session.pending_plan, manifest)
     assert not session.registered_plans and session.last_result is None
 
@@ -159,12 +160,13 @@ def test_workflow_collects_slots_before_execution_and_restores_dependencies(exec
     entity = agent.respond(session, second)
     assert entity.evidence["planning_calls"] == 0 and "步骤3" in entity.text
     assert session.pending_plan.steps[1] == details
-    assert not session.registered_plans and session.last_result is None
+    assert not session.registered_plans and session.last_result is not None
+    assert [t["status"] for t in session.workflow_tasks] == ["completed", "completed", "needs_input", "completed"]
 
     session = store.load(session.session_id, manifest)
     turn = agent.respond(session, "2025年")
     assert provider.calls == 1 and turn.evidence["type"] == "workflow"
-    assert turn.evidence["planning_calls"] == 0 and turn.evidence["calls_used"] == 3
+    assert turn.evidence["planning_calls"] == 0 and turn.evidence["calls_used"] == 1
     assert session.pending_plan is None
     assert turn.evidence["plan"]["steps"][1] == details.model_dump(mode="json")
     contribution, detail_record, diagnosis, explained = turn.evidence["steps"]

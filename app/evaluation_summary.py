@@ -17,9 +17,11 @@ def summarize(paths: list[Path]) -> dict:
     if len({report["implementation_sha256"] for _, report in reports}) != 1:
         raise ValueError("不同实现版本的报告必须分别汇总")
     latest = {}
+    runs = []
     superseded = []
     for path, report in sorted(reports, key=lambda pair: datetime.fromisoformat(pair[1]["created_at"])):
         for record in report["cases"]:
+            runs.append({**record, "dataset_id": report["dataset_id"], "replicate_id": report.get("replicate_id", str(path)), "source_report": str(path)})
             key = (report["dataset_id"], record["case_id"])
             if key in latest:
                 superseded.append(latest[key])
@@ -43,6 +45,9 @@ def summarize(paths: list[Path]) -> dict:
         "missing": missing, "planning_calls": sum(c["planning_calls"] for c in records),
         "categories": {category: {"completed": count, "passed": sum(c["passed"] for c in records if c["category"] == category)} for category, count in categories.items()},
         "superseded": superseded, "cases": records,
+        "all_runs": runs,
+        "stability": {"runs": len(runs), "passed": sum(r["passed"] for r in runs),
+                      "pass_rate": sum(r["passed"] for r in runs)/len(runs) if runs else None},
     }
 
 

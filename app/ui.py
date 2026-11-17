@@ -68,6 +68,9 @@ def build_ui():
     def result_components(evidence):
         view = present(evidence)
         options = choices(AnalysisPlan.model_validate(evidence["plan"]), executors[evidence["dataset_id"]].manifest) if evidence.get("type") == "clarify" else []
+        if evidence.get("type") == "workflow":
+            pending = next((step for step in evidence["plan"]["steps"] if step["intent"] == "clarify"), None)
+            options = choices(AnalysisPlan.model_validate(pending), executors[evidence["dataset_id"]].manifest) if pending else []
         frame = pd.DataFrame(view.chart, columns=["分组", "数值"])
         return (
             gr.Dataframe(value={"headers": view.headers, "data": view.table}, visible=bool(view.headers)),
@@ -84,8 +87,11 @@ def build_ui():
         turn = agent.respond(session, question, practice_context)
         return "", session.transcript, session, turn.evidence, *result_components(turn.evidence), archives(dataset_id, session.session_id)
 
-    def switch_dataset(dataset_id):
+    def switch_dataset(dataset_id, session):
         questions = example_questions(executors[dataset_id].manifest) if dataset_id in executors else []
+        if session and session.dataset_id == dataset_id and session.last_evidence:
+            return (session.transcript, session, session.last_evidence, gr.Dropdown(choices=questions, value=None),
+                    *result_components(session.last_evidence), archives(dataset_id, session.session_id), "SELECT * FROM analysis_result", "[]", "analysis_result", "")
         return ([], Session(dataset_id) if dataset_id in executors else None, {}, gr.Dropdown(choices=questions, value=None),
                 *result_components({}), archives(dataset_id), "SELECT * FROM analysis_result", "[]", "analysis_result", "")
 
@@ -135,7 +141,7 @@ def build_ui():
 
     def result_controls(evidence, session):
         current = display_evidence(evidence)
-        result = current.get("result", {})
+        result = current.get("result") or {}
         ready = result.get("status") in {"ok", "empty"}
         plan = current.get("plan", {})
         can_drill = ready and current.get("type") == "query" and plan.get("intent") in {"aggregate", "rank", "compare", "contribution", "details", "diagnose"}
@@ -182,13 +188,51 @@ def build_ui():
         if root.get("type") != "workflow":
             raise ValueError("当前不是多步骤分析")
         selected = root["steps"][int(index)-1]
-        if selected["type"] == "query" and selected["result"]["status"] in {"ok", "empty"}:
+        session.focus_step = int(index)
+        if selected.get("type") == "query" and selected["result"]["status"] in {"ok", "empty"}:
             session.last_successful_plan = AnalysisPlan.model_validate(selected["plan"])
             session.last_result = QueryResult.model_validate(selected["result"])
             session.analysis_evidence = selected
         session.last_evidence = selected
         store.save(session, executors[session.dataset_id].manifest)
         return session, selected, *result_components(selected)
+
+    def replay_current(session, target):
+        fresh, turn = agent.replay(session, target)
+        return fresh.transcript, fresh, turn.evidence, *result_components(turn.evidence), archives(target, fresh.session_id), target
+
+    def compare_current(session, target, mode, source, resume=False):
+        from app.models import ComparisonRequest
+        from app.answers import label
+        turn = agent.compare(session, ComparisonRequest(target_dataset_id=target, mode=mode, source=source) if not resume else None, resume=resume)
+        state = turn.evidence
+        report = state["stages"]["diff"].get("report", {})
+        labels = {"known": "已确认", "unknown": "未知", "absent": "无此分组", "not_applicable": "无适用样本"}
+        table = [["本期" if r["period"] == "current" else "基期", r["entity_id"], label(r["metric"]), r["before"]["value"], labels[r["before"]["state"]],
+                  r["after"]["value"], labels[r["after"]["state"]], r["delta"],
+                  (f"共同变化 {r['membership']['common_change']}；进入 {r['membership']['entered_value']}；退出 {r['membership']['exited_value']}；未确认 {r['membership']['unknown_count']}" if r["membership"] else "按指标定义重算"),
+                  "通过" if r["reconciled"] is True else "暂不能确认" if r["reconciled"] is None else "不一致",
+                  "是" if r["displayed_before"] else "否", "是" if r["displayed_after"] else "否"]
+                 for r in report.get("metric_comparisons", [])[:500]]
+        changes = [[r["layer"], r["key"], r["change"], r["before"], r["after"], r["explanation"]] for r in report.get("preview", [])]
+        stringify = lambda rows: [["—" if v is None else json.dumps(v, ensure_ascii=False, default=str) if isinstance(v, (list, dict)) else str(v) for v in row] for row in rows]
+        return (session.transcript, session, turn.text,
+            gr.Dataframe(value={"headers": ["期间", "分组", "指标", "原值", "原完整度", "新值", "新完整度", "差额", "范围成员分解", "勾稽", "原表可见", "新表可见"], "data": stringify(table)}, visible=bool(table)),
+            gr.Dataframe(value={"headers": ["差异层次", "业务键", "变化", "原记录", "新记录", "解释"], "data": stringify(changes)}, visible=bool(changes)),
+            gr.DownloadButton(value=state.get("bundle_file"), visible=state.get("status") == "completed"),
+            gr.DownloadButton(value=state["report_file"], visible=True), state, archives(session.dataset_id, session.session_id))
+
+    def remove_condition(session, field):
+        from app.models import PlanUpdate
+        turn = agent.update_conditions(session, PlanUpdate(operation="remove", field=field))
+        session.remember("撤回条件：" + field, turn.text)
+        store.save(session, executors[session.dataset_id].manifest)
+        return session.transcript, session, turn.evidence, *result_components(turn.evidence), archives(session.dataset_id, session.session_id)
+
+    def inspect_quality(session):
+        turn = agent.quality_details(session)
+        view = present(turn.evidence)
+        return gr.Dataframe(value={"headers": view.headers, "data": view.table}, visible=True), gr.DownloadButton(value=view.csv_file, visible=True)
 
     def chart_drill(session, target, evt: gr.SelectData):
         current = display_evidence(session.last_evidence)
@@ -223,8 +267,9 @@ def build_ui():
         structure = discover(files)
         return structure, json.dumps(suggest_mapping(structure), ensure_ascii=False, indent=2)
 
-    def upload_dataset(files, mapping, name):
-        manifest = import_upload(files, json.loads(mapping), name)
+    def upload_dataset(files, mapping, name, parent=None, note="", origin="uploaded"):
+        version = {"parent_dataset_id": parent, "change_note": note, "data_origin": origin} if parent or note or origin != "uploaded" else {}
+        manifest = import_upload(files, json.loads(mapping), name, **version)
         dataset_id = manifest["dataset_id"]
         datasets[dataset_id] = manifest["name"]
         executors[dataset_id] = Executor(dataset_id)
@@ -247,17 +292,15 @@ def build_ui():
         return archives(dataset_id, selected["session_id"])
 
     def apply_scope(session, dataset_id, date_field, statuses, start, end, order_conditions, item_conditions):
-        from app.models import Predicate, TimeRange
-        from app.trace import TurnTrace
+        from app.models import PlanUpdate, Predicate, TimeRange
         session = current_session(session, dataset_id)
-        if session.last_successful_plan is None:
-            raise ValueError("先完成一次分析，再应用新的范围和筛选条件")
-        plan = session.last_successful_plan.model_copy(update={"time_field": date_field, "order_statuses": statuses,
-            "time_range": TimeRange(start=start, end=end), "order_where": Predicate.model_validate_json(order_conditions) if order_conditions.strip() else session.last_successful_plan.order_where,
-            "item_where": Predicate.model_validate_json(item_conditions) if item_conditions.strip() else session.last_successful_plan.item_where})
-        with TurnTrace(session.session_id, dataset_id, "应用范围与条件", "scope-editor") as trace:
-            turn = agent.run_plan(session, plan, "应用范围与条件", 0, trace)
-        session.last_evidence = turn.evidence
+        changes = [PlanUpdate(operation="set", field="time_field", values=[date_field]),
+                   PlanUpdate(operation="set", field="order_statuses", values=statuses),
+                   PlanUpdate(operation="set", field="time_range", period=TimeRange(start=start, end=end))]
+        for field, raw in [("order_where", order_conditions), ("item_where", item_conditions)]:
+            if raw.strip():
+                changes.append(PlanUpdate(operation="set", field=field, predicate=Predicate.model_validate_json(raw)))
+        turn = agent.update_conditions(session, changes)
         session.remember("应用范围与条件", turn.text)
         store.save(session, executors[dataset_id].manifest)
         return session.transcript, session, turn.evidence, *result_components(turn.evidence), archives(dataset_id, session.session_id)
@@ -293,8 +336,9 @@ def build_ui():
                 chart_metrics = gr.CheckboxGroup(choices=[], label="选择展示指标")
                 interactive_charts = gr.HTML(value="", js_on_load=CLICK_SCRIPT)
             with gr.Row(visible=False) as workflow_controls:
-                step_number = gr.Number(value=1, precision=0, minimum=1, maximum=4, label="分析步骤")
+                step_number = gr.Number(value=1, precision=0, minimum=1, maximum=6, label="分析步骤")
                 show_step = gr.Button("查看此步骤结果")
+                resume_tasks = gr.Button("继续未完成任务")
             with gr.Row(visible=False) as pagination_controls:
                 page_size = gr.Number(value=100, precision=0, minimum=1, maximum=500, label="每页行数")
                 previous_page = gr.Button("上一页")
@@ -305,11 +349,14 @@ def build_ui():
                 download_json = gr.DownloadButton("下载完整依据 JSON", visible=False)
                 export_all = gr.Button("导出全部结果", visible=False)
                 download_all = gr.DownloadButton("下载完整结果", visible=False)
+                inspect_quality_button = gr.Button("查看质量依据")
             export_status = gr.Markdown()
+            quality_table = gr.Dataframe(label="当前分析范围质量记录（最多500条，来源行号从表头下一行起）", interactive=False, visible=False)
+            quality_download = gr.DownloadButton("下载质量记录", visible=False)
             evidence = gr.JSON(visible=False)
             with gr.Accordion("高级分析 · SQL", open=False):
                 gr.Markdown("使用 SQL 进一步分析数据。查询上次分析结果时，数据表名为 `analysis_result`。")
-                sql_scope = gr.Radio(choices=[("上次完整分析结果", "analysis_result"), ("原始表", "raw")], value="analysis_result", label="SQL 数据范围")
+                sql_scope = gr.Radio(choices=[("上次成功分析结果（含完整度）", "analysis_result"), ("规范化业务表", "raw")], value="analysis_result", label="SQL 数据范围")
                 inspect_sql = gr.Button("查看当前可用字段")
                 sql_catalog = gr.JSON(visible=False)
                 sql_fields = gr.Dataframe(label="可用字段", interactive=False, visible=False)
@@ -333,6 +380,23 @@ def build_ui():
                 order_conditions = gr.Code(value="", language="json", visible=False)
                 item_conditions = gr.Code(value="", language="json", visible=False)
                 apply_conditions = gr.Button("对上次分析应用这些条件")
+                condition_field = gr.Dropdown(choices=[("品类", "category_id"), ("商家", "seller_id"), ("客户省份", "customer_state"), ("整单商品金额", "order_sales"), ("支付额", "payment_amount"), ("商品单价", "price")], value="category_id", label="撤回筛选条件")
+                remove_filter = gr.Button("撤回此字段全部简单筛选")
+            with gr.Accordion("换数据重算", open=False):
+                replay_target = gr.Dropdown(choices=[(name, key) for key, name in datasets.items()], label="目标数据快照")
+                replay_button = gr.Button("在目标快照新建会话并重算")
+                comparison_mode = gr.Radio(choices=[("固定原范围比较", "fixed_scope"), ("按原意图重算比较", "intent_replay")], value="fixed_scope", label="版本比较方式")
+                comparison_source = gr.Radio(choices=[("当前选定的成功结果", "current_result"), ("当前分析意图（含尚未成功的条件）", "working_plan")], value="current_result", label="比较哪份分析")
+                gr.Markdown("固定范围保留原日期和对象；相同筛选下订单仍可能进入或退出范围。按意图重算工作流时，比较当前选定步骤，前置步骤会重新选择对象。")
+                with gr.Row():
+                    compare_button = gr.Button("比较两个版本")
+                    resume_comparison = gr.Button("继续上次版本比较")
+                comparison_summary = gr.Markdown()
+                comparison_table = gr.Dataframe(label="版本指标与范围变化（全候选集，预览最多500行）", interactive=False, visible=False, datatype="str")
+                comparison_changes = gr.Dataframe(label="业务键与质量差异（预览最多500行）", interactive=False, visible=False, datatype="str")
+                comparison_bundle = gr.DownloadButton("下载完整比较证据包", visible=False)
+                comparison_report = gr.DownloadButton("下载比较进度及报告", visible=False)
+                comparison_json = gr.JSON(visible=False)
             with gr.Accordion("检索历史分析", open=False):
                 history_hits = gr.State([])
                 history_query = gr.Textbox(label="关键词或指标", placeholder="例如：销售额、回头客、商家延迟率")
@@ -350,13 +414,16 @@ def build_ui():
             upload_mapping = gr.Code(language="json", visible=False)
             upload_fields = gr.Dataframe(label="核对字段对应关系（可修改来源文件、工作表和来源列名）", interactive=True, visible=False, datatype=["str"]*6, column_count=6, static_columns=[0, 1, 2])
             upload_name = gr.Textbox(label="数据集名称")
+            upload_parent = gr.Dropdown(choices=[(name, key) for key, name in datasets.items()], value=None, label="来源版本（可留空；不按上传顺序推断）")
+            upload_note = gr.Textbox(value="", label="本次数据变化说明（可留空）")
+            upload_origin = gr.Radio(choices=[("自行上传", "uploaded"), ("正式复赛材料", "official"), ("练习数据", "practice"), ("本地构造", "constructed")], value="uploaded", label="材料来源声明")
             import_files = gr.Button("校验映射并导入")
             upload_status = gr.Markdown()
         questions.change(lambda value: value, questions, message)
         slot_choice.change(lambda value: value, slot_choice, message)
         result_outputs = [result_table, bar, line, download_csv, download_json, slot_choice]
         sql_outputs = [sql_editor, sql_parameters, sql_scope, sql_note]
-        dataset.change(switch_dataset, dataset, [chat, session, evidence, questions, *result_outputs, saved, *sql_outputs], concurrency_id="analysis")
+        dataset.change(switch_dataset, [dataset, session], [chat, session, evidence, questions, *result_outputs, saved, *sql_outputs], concurrency_id="analysis")
         shared_outputs = [chat, session, evidence, *result_outputs, saved]
         reset.click(new_session, dataset, [*shared_outputs, *sql_outputs], concurrency_id="analysis")
         refresh.click(archives, dataset, saved)
@@ -371,6 +438,7 @@ def build_ui():
         generate.click(draft_sql, [sql_question, session, dataset, sql_scope], [sql_editor, sql_note, session, saved, sql_parameters], concurrency_id="analysis")
         execute_sql.click(run_sql, [sql_editor, sql_parameters, session, dataset, sql_scope], shared_outputs, concurrency_id="analysis")
         evidence.change(refresh_visuals, evidence, [chart_metrics, interactive_charts, download_all, export_status, sql_validation], concurrency_id="analysis")
+        evidence.change(lambda: (gr.Dataframe(visible=False), gr.DownloadButton(value=None, visible=False)), outputs=[quality_table, quality_download], concurrency_id="analysis")
         evidence.change(result_controls, [evidence, session], [drill_controls, workflow_controls, pagination_controls, export_all, chart_controls], concurrency_id="analysis")
         sql_catalog.change(catalog_table, sql_catalog, sql_fields, concurrency_id="analysis")
         sql_validation.change(validation_text, sql_validation, sql_validation_message, concurrency_id="analysis")
@@ -382,10 +450,22 @@ def build_ui():
         next_page.click(page_next, [session, page_size], shared_outputs, concurrency_id="analysis")
         refresh_page.click(page_refresh, [session, page_size], shared_outputs, concurrency_id="analysis")
         export_all.click(full_export, session, [download_all, export_status], concurrency_id="analysis")
+        inspect_quality_button.click(inspect_quality, session, [quality_table, quality_download], concurrency_id="analysis")
         show_step.click(select_step, [session, step_number], [session, evidence, *result_outputs], concurrency_id="analysis")
+        resume_tasks.click(lambda session: (agent.respond(session, "/continue"), session)[1], session, session, concurrency_id="analysis").then(
+            lambda s: (s.transcript, s, s.last_evidence, *result_components(s.last_evidence), archives(s.dataset_id, s.session_id)), session, shared_outputs, concurrency_id="analysis")
+        remove_filter.click(remove_condition, [session, condition_field], shared_outputs, concurrency_id="analysis")
+        replay_button.click(replay_current, [session, replay_target], [*shared_outputs, dataset], concurrency_id="analysis")
+        comparison_outputs = [chat, session, comparison_summary, comparison_table, comparison_changes, comparison_bundle, comparison_report, comparison_json, saved]
+        compare_button.click(compare_current, [session, replay_target, comparison_mode, comparison_source], comparison_outputs, concurrency_id="analysis")
+        resume_comparison.click(lambda s, t, m, source: compare_current(s, t, m, source, True), [session, replay_target, comparison_mode, comparison_source], comparison_outputs, concurrency_id="analysis")
+        dataset.change(lambda: ("", gr.Dataframe(visible=False), gr.Dataframe(visible=False), gr.DownloadButton(value=None, visible=False), gr.DownloadButton(value=None, visible=False), {}),
+            outputs=[comparison_summary, comparison_table, comparison_changes, comparison_bundle, comparison_report, comparison_json], concurrency_id="analysis")
+        dataset.change(lambda: gr.Dropdown(choices=[(name, key) for key, name in datasets.items()]), outputs=replay_target)
+        dataset.change(lambda: gr.Dropdown(choices=[(name, key) for key, name in datasets.items()], value=None), outputs=upload_parent)
         verify_sql_button.click(verify_sql, [sql_editor, sql_parameters, session, dataset, sql_scope], sql_validation, concurrency_id="analysis")
         inspect_files.click(inspect_upload, upload_files, [upload_structure, upload_mapping], concurrency_id="analysis")
-        import_files.click(upload_dataset, [upload_files, upload_mapping, upload_name], [dataset, practice, upload_status], concurrency_id="analysis")
+        import_files.click(upload_dataset, [upload_files, upload_mapping, upload_name, upload_parent, upload_note, upload_origin], [dataset, practice, upload_status], concurrency_id="analysis")
         history_search.click(find_history, [history_query, history_start, history_end, dataset], [history_hits, history_table, history_text], concurrency_id="analysis")
         history_table.select(choose_history, [history_hits, dataset], saved, concurrency_id="analysis")
         apply_conditions.click(apply_scope, [session, dataset, date_field, statuses, range_start, range_end, order_conditions, item_conditions], shared_outputs, concurrency_id="analysis")

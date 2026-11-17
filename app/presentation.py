@@ -1,5 +1,6 @@
 """表格、图表和导出共用当前查询证据，不重复查询或调用模型。"""
 import csv
+import json
 from dataclasses import dataclass, field
 
 from app.answers import LABELS, cell, label, plan_label
@@ -20,7 +21,12 @@ class ResultView:
 
 def display_evidence(evidence: dict) -> dict:
     if evidence.get("type") == "workflow":
-        queries = [step for step in evidence["steps"] if step.get("type") == "query"]
+        focus = evidence.get("focus_step")
+        if focus and focus <= len(evidence["steps"]):
+            selected = evidence["steps"][focus-1]
+            if (selected.get("result") or {}).get("status") in {"ok", "empty"}:
+                return selected
+        queries = [step for step in evidence["steps"] if step.get("type") == "query" and step["result"]["status"] in {"ok", "empty"}]
         return queries[-1] if queries else evidence
     return evidence
 
@@ -33,7 +39,7 @@ def present(evidence: dict, metric: str | None = None) -> ResultView:
     evidence = display_evidence(evidence)
     directory = RUNS_DIR / evidence["dataset_id"]
     view.evidence_file = str(directory / f"{original['record_id']}.json")
-    if evidence["type"] not in {"query", "sql_exploration"}:
+    if evidence["type"] not in {"query", "sql_exploration", "quality_details"}:
         return view
     result = QueryResult.model_validate(evidence["result"])
     if result.status not in {"ok", "empty"}:
@@ -41,12 +47,19 @@ def present(evidence: dict, metric: str | None = None) -> ResultView:
     plan = AnalysisPlan.model_validate(evidence["plan"]) if evidence["type"] == "query" else None
     view.headers = [plan_label(c, plan) for c in result.columns] if plan else result.columns
     view.table = [[cell(c, v, plan) if plan else ("NULL" if v is None else str(v)) for c, v in zip(result.columns, row)] for row in result.rows]
+    if result.quality:
+        from app.quality import quality_note
+        view.headers.append("数据完整度")
+        view.table = [row + [quality_note(q)] for row, q in zip(view.table, result.quality)]
     # CSV 保留原始列名、金额精度和0~1比例；JSON同时保存口径、期间与SQL。
     path = directory / f"{result.query_id}.csv"
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(result.columns)
-        writer.writerows(result.rows)
+        writer.writerow(result.columns + (["__quality"] if result.quality else []))
+        if result.quality:
+            writer.writerows([*row, json.dumps(q, ensure_ascii=False, default=str)] for row, q in zip(result.rows, result.quality))
+        else:
+            writer.writerows(result.rows)
     view.csv_file = str(path)
     if not result.rows:
         return view
@@ -72,8 +85,11 @@ def present(evidence: dict, metric: str | None = None) -> ResultView:
     ratio = metric in {"delay_rate", "low_score_rate", "contribution_rate"} or metric.endswith("_rate")
     for values in result.rows:
         row = dict(zip(result.columns, values))
+        group_name = str(row["entity_name"]) if row["entity_name"] is not None else "未标注"
         if row[metric] is not None:
-            view.chart.append({"分组": row["entity_name"], "数值": float(row[metric]) * (100 if ratio else 1)})
+            view.chart.append({"分组": group_name, "数值": float(row[metric]) * (100 if ratio else 1)})
+        else:
+            view.chart.append({"分组": group_name + "（未知/不可计算）", "数值": None})
     view.chart_kind = "line" if plan.dimension == "month" else "bar"
     view.chart_title = label(metric) + ("（%）" if ratio else "")
     return view

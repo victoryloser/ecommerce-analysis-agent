@@ -1,12 +1,13 @@
 """订单条件与商品明细条件分开定义，分别在对应粒度求值。"""
 from app.models import Predicate
+from app.quality import exact_sum
 
 ORDER_FIELDS = {
     "order_id": "o.order_id", "customer_state": "c.customer_state", "order_status": "o.order_status",
     "delivery_status": "CASE WHEN o.delivered_at IS NULL OR o.estimated_delivery_at IS NULL THEN 'unknown' WHEN o.delivered_at>o.estimated_delivery_at THEN 'delayed' ELSE 'on_time' END",
-    "order_sales": "(SELECT SUM(z.price) FROM order_items z WHERE z.order_id=o.order_id)",
-    "order_freight": "(SELECT SUM(z.freight_value) FROM order_items z WHERE z.order_id=o.order_id)",
-    "payment_amount": "(SELECT SUM(z.payment_value) FROM order_payments z WHERE z.order_id=o.order_id)",
+    "order_sales": f"(SELECT {exact_sum('z.price')} FROM order_items z WHERE z.order_id=o.order_id)",
+    "order_freight": f"(SELECT {exact_sum('z.freight_value')} FROM order_items z WHERE z.order_id=o.order_id)",
+    "payment_amount": f"(SELECT {exact_sum('z.payment_value')} FROM order_payments z WHERE z.order_id=o.order_id)",
     "review_score": "(SELECT MAX(z.review_score) FROM order_reviews z WHERE z.order_id=o.order_id)",
 }
 ITEM_FIELDS = {"category_id": "p.category_id", "seller_id": "i.seller_id", "product_id": "i.product_id", "price": "i.price", "freight_value": "i.freight_value"}
@@ -54,4 +55,6 @@ def predicate_sql(node: Predicate | None, fields: dict, depth: int = 0) -> tuple
             symbol = {"eq": "=", "ne": "<>", "gt": ">", "ge": ">=", "lt": "<", "le": "<="}[operator]
             sql = f"{column}{symbol}?"
             parameters.extend(values)
+    if node.field == "review_score" and node.operator not in {"is_null", "not_null"}:
+        sql = f"COALESCE(({sql}),FALSE)"
     return (f"NOT ({sql})" if node.negate else sql), parameters

@@ -21,6 +21,9 @@ Analyze ecommerce operations through natural-language questions. Explore product
 | History and exports | Restore local sessions and download the current page or complete query results |
 | SQL workspace | Run read-only SQL against source tables or the complete result of a previous analysis |
 | Data import | Upload Excel / CSV files that follow the supported ecommerce schema and confirm field mappings |
+| Snapshot comparison | Compare a fixed scope or replay the analysis intent; inspect revisions, membership changes, quality transitions, and a complete evidence bundle |
+
+Snapshot comparison is available in the “换数据重算” panel. Select a target snapshot and choose either a fixed scope or intent replay, then compare and download the evidence bundle. Failed comparisons can resume from the last completed stage. Rebuilding built-in samples preserves earlier snapshots.
 
 ## Screenshots
 

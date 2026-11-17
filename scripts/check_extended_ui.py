@@ -18,6 +18,8 @@ class ScriptedProvider:
 
 
 def main():
+    from app.snapshots import resolve_dataset
+    dataset = resolve_dataset("csv_small")
     import asyncio
     import csv
     from pathlib import Path
@@ -32,8 +34,8 @@ def main():
     try:
         demo.launch(server_name="127.0.0.1",server_port=7864,prevent_thread_lock=True,quiet=True)
         client=Client("http://127.0.0.1:7864/",verbose=False)
-        client.predict("csv_small",api_name="/switch_dataset")
-        workflow=client.predict("复合分析",[],"csv_small",True,api_name="/submit")
+        client.predict(dataset,api_name="/switch_dataset")
+        workflow=client.predict("复合分析",[],dataset,True,api_name="/submit")
         assert workflow[2]["type"]=="workflow" and len(workflow[2]["steps"])==3
         first=client.predict(1,api_name="/select_step")
         assert first[0]["plan"]["intent"]=="compare"
@@ -48,7 +50,7 @@ def main():
         event=gr.SelectData(None,{"index":0,"value":key,"selected":True})
         clicked=asyncio.run(demo.process_api(fn,[None,"orders"],state=demo.state_holder[client.session_hash],session_hash=client.session_hash,event_data=event))
         assert clicked["data"][2].root["plan"]["filters"][0]["values"]==[key]
-        details=client.predict("订单明细",[],"csv_small",True,api_name="/submit")
+        details=client.predict("订单明细",[],dataset,True,api_name="/submit")
         page=client.predict(50,api_name="/page_refresh")
         assert len(page[1]["result"]["rows"])==50 and page[1]["result"]["truncated"]
         next_page=client.predict(50,api_name="/page_next")
@@ -56,9 +58,9 @@ def main():
         exported=client.predict(api_name="/full_export")
         with Path(exported[0]["value"]).open(encoding="utf-8-sig",newline="") as handle:
             assert len(list(csv.DictReader(handle)))==159
-        checked=client.predict("SELECT * FROM analysis_result", "[]", "csv_small", "analysis_result",api_name="/verify_sql")
+        checked=client.predict("SELECT * FROM analysis_result", "[]", dataset, "analysis_result",api_name="/verify_sql")
         assert checked["matched"] and checked["differing_rows"]==0
-        history=client.predict("复合分析","","","csv_small",api_name="/find_history")
+        history=client.predict("复合分析","","",dataset,api_name="/find_history")
         assert "步骤" in history[-1]
 
         # 从示例 CSV复制数据走上传UI，字段映射能力另由陌生列名回归覆盖。

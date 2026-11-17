@@ -61,6 +61,7 @@ def drill_plan(parent: AnalysisPlan, result: QueryResult, row_index: int, target
         condition = Predicate(field="delivery_status", values=[entity_id])
         order_where = Predicate(children=[order_where, condition]) if order_where else condition
     plan = parent.model_copy(update={"intent": "aggregate", "dimension": target, "time_range": period,
+        "period_mode": "explicit_range", "comparison_mode": "none",
         "filters": filters, "comparison_range": None, "min_group_count": 1, "top_n": 10,
         "order_where": order_where, "selected_order_id": selected_order_id})
     if target in {"orders", "items", "payments", "reviews"}:

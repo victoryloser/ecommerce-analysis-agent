@@ -50,7 +50,9 @@ def main():
         "implementation_sha256": hashlib.sha256(b"".join(p.name.encode()+p.read_bytes() for p in sorted((ROOT/"app").glob("*.py")))).hexdigest(),
         "total": 8, "passed": 0, "status": "running", "cases": []}
     path = RUNS_DIR/f"clarification-live-{uuid4().hex}.json"
+    from app.snapshots import resolve_dataset
     for dataset in DATASETS:
+        dataset = resolve_dataset(dataset)
         executor, oracle = Executor(dataset), SourceOracle(dataset)
         agent = AnalysisAgent(provider, {dataset: executor})
         contribution = practice_plans(executor.manifest)["Q03"].model_copy(update={"intent": "contribution", "dimension": "category"})

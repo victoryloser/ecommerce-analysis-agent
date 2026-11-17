@@ -5,6 +5,7 @@ from app.config import DATA_DIR, ROOT
 from app.executor import Executor
 from app.import_data import import_dataset
 from app.source import SCHEMA
+from app.snapshots import resolve_dataset
 
 
 def prepare_local_demo(dataset_id):
@@ -12,9 +13,9 @@ def prepare_local_demo(dataset_id):
              [ROOT / "material/ecommerce_agent_demo_csv" / f"{table}.csv" for table in SCHEMA])
     if not all(path.is_file() for path in paths):
         pytest.skip(f"本地样例 {dataset_id} 未提供；仓库不分发数据文件")
-    if not (DATA_DIR / f"{dataset_id}.manifest.json").exists():
+    if not (DATA_DIR / f"{resolve_dataset(dataset_id)}.manifest.json").exists():
         import_dataset(dataset_id)
-    return dataset_id
+    return resolve_dataset(dataset_id)
 
 
 @pytest.fixture(scope="session")

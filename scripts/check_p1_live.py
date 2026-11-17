@@ -44,7 +44,9 @@ def main():
         path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(dataset, stage, "PASS", flush=True)
 
+    from app.snapshots import resolve_dataset
     for dataset in DATASETS:
+        dataset = resolve_dataset(dataset)
         executor = Executor(dataset)
         report["snapshots"][dataset] = {key: executor.manifest[key] for key in ("database_sha256", "metadata_sha256", "schema_sha256")}
         oracle = SourceOracle(dataset)

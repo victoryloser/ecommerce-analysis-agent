@@ -9,6 +9,9 @@ from app.source import read_source
 
 
 def calculate(dataset_id: str) -> dict:
+    from app.snapshots import resolve_dataset
+    from app.semantic import load_manifest
+    dataset_id = resolve_dataset(dataset_id)
     tables = read_source(dataset_id)
     delivered = {r["order_id"]: r for r in tables["orders"] if r["order_status"] == "delivered"}
     customers = {r["customer_id"]: r["customer_unique_id"] for r in tables["customers"]}
@@ -36,7 +39,7 @@ def calculate(dataset_id: str) -> dict:
     def is_late(order):
         return str(order["delivered_at"]) > str(order["estimated_delivery_at"])
 
-    threshold = 10 if dataset_id == "excel_full" else 3
+    threshold = load_manifest(dataset_id)["practice"]["min_seller_orders"] if (DATA_DIR / f"{dataset_id}.manifest.json").exists() else (10 if dataset_id == "excel_full" else 3)
     delay_rates = {}
     for seller, orders in seller_orders.items():
         if len(orders) >= threshold:

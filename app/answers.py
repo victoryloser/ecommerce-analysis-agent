@@ -5,6 +5,9 @@ from app.models import AnalysisPlan, QueryResult
 from app.semantic import METRICS, RELATIONSHIPS
 
 LABELS = {
+    "membership_confirmed": "已确认符合筛选", "order_sales_known": "已确认商品金额", "order_sales_unknown": "未知商品金额成分数",
+    "order_freight_known": "已确认运费", "order_freight_unknown": "未知运费成分数", "payment_known": "已确认支付金额",
+    "payment_unknown": "未知支付金额成分数", "payment_missing": "整单缺支付记录",
     "entity_id": "分组ID", "entity_name": "分组", "sales": "商品销售额（元）", "order_count": "已送达订单数",
     "payment_amount": "支付金额（元）", "delay_rate": "延迟率", "avg_review": "平均评分", "low_score_rate": "低分率",
     "repeat_customers": "复购自然客户数", "sample_orders": "已送达订单数", "delayed_orders": "延迟订单数",
@@ -90,9 +93,11 @@ def conclusion(plan: AnalysisPlan, result: QueryResult) -> str:
         change = f"{direction}，变化率 {cell('change_rate', rate, plan)}" if rate is not None else "变化率不可计算（基期为零或数据缺失）"
         return f"本期 {cell('current_value', row['current_value'], plan)}，基期 {cell('previous_value', row['previous_value'], plan)}；{change}。"
     if plan.intent == "rank" and row[plan.metric_ids[0]] is not None:
+        if row["rank_no"] is None:
+            return "存在未知候选，无法确认总体排名；已确认金额仅供查看。"
         ranked_rows = [dict(zip(result.columns, values)) for values in result.rows]
         leaders = [r for r in ranked_rows if r["rank_no"] == 1]
-        names = "、".join(r["entity_name"] for r in leaders)
+        names = "、".join(str(r["entity_name"]) if r["entity_name"] is not None else "未标注" for r in leaders)
         metric = plan.metric_ids[0]
         return f"{'并列第一' if len(leaders) > 1 else '排名第一'}：{names}；{LABELS[metric]}为 {cell(metric, row[metric], plan)}。"
     if plan.dimension == "total":
@@ -102,6 +107,13 @@ def conclusion(plan: AnalysisPlan, result: QueryResult) -> str:
 
 
 def answer(plan: AnalysisPlan, result: QueryResult, manifest: dict) -> str:
+    text = _answer(plan, result, manifest)
+    from app.quality import quality_note
+    notes = [f"第{index+1}组：{quality_note(q)}" for index, q in enumerate(result.quality) if quality_note(q) != "完整"]
+    return text + ("\n\n数据完整度：\n\n" + "\n\n".join(notes[:30]) if notes else "")
+
+
+def _answer(plan: AnalysisPlan, result: QueryResult, manifest: dict) -> str:
     from app.advanced import extended
     if extended(plan):
         return advanced_answer(plan, result, manifest)
@@ -140,7 +152,10 @@ def advanced_answer(plan: AnalysisPlan, result: QueryResult, manifest: dict) -> 
     if plan.intent == "contribution":
         first = dict(zip(result.columns, result.rows[0]))
         metric = plan.metric_ids[0]
-        notes.append(f"增长贡献最大的分组：{first['entity_name']}，变化额 {cell(metric+'_change', first[metric+'_change'], plan)}。")
+        if first["total_change"] is not None:
+            notes.append(f"增长贡献最大的分组：{first['entity_name']}，变化额 {cell(metric+'_change', first[metric+'_change'], plan)}。")
+        else:
+            notes.append("部分分组变化未知，不能确认总体贡献排名和净增长贡献率。完整分组仍展示变化额。")
         notes.append("贡献率=分组变化额/整体净变化额；下降可为负，正向贡献可超过100%；净变化为0时不可计算。")
     elif plan.intent == "compare":
         notes.append("按分组对齐本期与基期；可加指标缺失分组记0，缺评分/比率保留不可计算；基期0时变化率不可计算。")

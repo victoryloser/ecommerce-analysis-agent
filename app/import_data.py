@@ -1,6 +1,8 @@
 import argparse
 import hashlib
 import json
+import shutil
+from uuid import uuid4
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -9,18 +11,42 @@ import duckdb
 from app.config import DATA_DIR, DATASETS, METADATA_VERSION, ROOT
 from app.semantic import metadata_hash
 from app.source import FOREIGN_KEYS, PRIMARY_KEYS, SCHEMA, read_source, source_files
+from app.quality import ISSUE_SCHEMA, QUALITY_RULE_VERSION, normalize_rows
+from app.snapshots import FINGERPRINT_VERSION, publish_alias, table_fingerprints
 
 
-def import_dataset(dataset_id: str) -> dict:
+def import_dataset(dataset_id: str, data_dir=DATA_DIR) -> dict:
     tables = read_source(dataset_id)
-    return import_tables(dataset_id, tables, source_files(dataset_id), DATASETS[dataset_id], DATA_DIR)
+    snapshot = dataset_id + "_" + uuid4().hex[:12]
+    manifest = import_tables(snapshot, tables, source_files(dataset_id), DATASETS[dataset_id], data_dir,
+        practice={"year_context": 2025, "min_seller_orders": 10 if dataset_id == "excel_full" else 3,
+                  "questions": tables.get("practice_questions", [])}, source_kind=dataset_id, data_origin="practice")
+    publish_alias(dataset_id, snapshot, data_dir)
+    return manifest
 
 
-def import_tables(dataset_id: str, tables: dict, sources: list, name: str, data_dir=DATA_DIR, *, practice=None) -> dict:
+def import_tables(dataset_id: str, tables: dict, sources: list, name: str, data_dir=DATA_DIR, *, practice=None,
+                  business_label="", parent_dataset_id=None, change_note="", data_origin="constructed", source_kind=None) -> dict:
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / f"{dataset_id}.duckdb"
+    if path.exists() or (data_dir / f"{dataset_id}.manifest.json").exists():
+        raise ValueError("快照 ID 已存在；请使用新 ID 导入，不能覆盖已发布数据")
+    if parent_dataset_id and not (data_dir / f"{parent_dataset_id}.manifest.json").exists():
+        raise ValueError("声明的父快照不存在")
+    retained = []
+    if sources:
+        directory = data_dir / "sources" / dataset_id
+        directory.mkdir(parents=True)
+        for source in sources:
+            target = directory / source.name
+            shutil.copyfile(source, target)
+            retained.append({"source_file": str(source.relative_to(ROOT)) if source.is_relative_to(ROOT) else source.name,
+                             "retained_file": target.relative_to(data_dir).as_posix(),
+                             "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
     with duckdb.connect(str(path)) as conn:
         conn.execute("BEGIN TRANSACTION")
+        issues = []
+        normalized_counts = {}
         for table, columns in SCHEMA.items():
             definition = ", ".join(f'"{name}" {kind}' for name, kind in columns.items())
             key = ", ".join(PRIMARY_KEYS[table])
@@ -36,15 +62,31 @@ def import_tables(dataset_id: str, tables: dict, sources: list, name: str, data_
                         value = Decimal(str(value))
                     elif kind == "VARCHAR":
                         value = str(value)
+                    elif kind == "INTEGER":
+                        value = int(value)
+                    elif kind == "DOUBLE":
+                        value = float(value)
+                    elif kind == "TIMESTAMP" and isinstance(value, str):
+                        value = datetime.fromisoformat(value)
                     converted.append(value)
                 values.append(converted)
+            values, table_issues = normalize_rows(table, values)
+            issues.extend(table_issues)
+            normalized_counts[table] = len(values)
             if values:
                 conn.executemany(f"INSERT INTO {table} VALUES ({', '.join('?' for _ in columns)})", values)
+        missing_payments = conn.execute("SELECT o.order_id FROM orders o WHERE NOT EXISTS (SELECT 1 FROM order_payments p WHERE p.order_id=o.order_id) ORDER BY o.order_id").fetchall()
+        issues.extend(("order_payments", oid, json.dumps([oid]), "payment_value", "missing_record", "[]", "[]") for (oid,) in missing_payments)
+        conn.execute("CREATE OR REPLACE TABLE quality_issues (" + ",".join(f"{field} {kind}" for field, kind in ISSUE_SCHEMA.items()) + ")")
+        if issues:
+            conn.executemany("INSERT INTO quality_issues VALUES (?,?,?,?,?,?,?,?)", [(index, *issue) for index, issue in enumerate(issues, 1)])
         for child, field, parent, key in FOREIGN_KEYS:
             missing = conn.execute(f"SELECT count(*) FROM {child} c LEFT JOIN {parent} p ON c.{field}=p.{key} WHERE p.{key} IS NULL").fetchone()[0]
             if missing:
                 raise ValueError(f"{child}.{field} 存在 {missing} 个无对应主记录的值")
         quality = {
+            "issue_count": len(issues),
+            "missing_payment_orders": len(missing_payments),
             "duplicate_review_orders": conn.execute("SELECT count(*) FROM (SELECT order_id FROM order_reviews GROUP BY order_id HAVING count(*)>1)").fetchone()[0],
             "delivered_missing_timing": conn.execute("SELECT count(*) FROM orders WHERE order_status='delivered' AND (delivered_at IS NULL OR estimated_delivery_at IS NULL)").fetchone()[0],
         }
@@ -61,13 +103,18 @@ def import_tables(dataset_id: str, tables: dict, sources: list, name: str, data_
             if first is not None:
                 next_year, next_month = (last.year+1, 1) if last.month == 12 else (last.year, last.month+1)
                 coverage_fields[field] = {"start": first.replace(day=1).date().isoformat(), "end": f"{next_year:04d}-{next_month:02d}-01"}
+        fingerprints = table_fingerprints(conn)
         conn.execute("COMMIT")
     # 期间按月给出覆盖边界，具体最早/最晚记录另存，不把月内无订单误判为未覆盖。
     end_year, end_month = (latest.year + 1, 1) if latest.month == 12 else (latest.year, latest.month + 1)
     manifest = {
         "dataset_id": dataset_id, "name": name, "metadata_version": METADATA_VERSION,
+        "business_label": business_label or name, "parent_dataset_id": parent_dataset_id, "change_note": change_note,
+        "data_origin": data_origin, "source_kind": source_kind,
+        "fingerprint_version": FINGERPRINT_VERSION, "semantic_fingerprints": fingerprints,
+        "quality_rule_version": QUALITY_RULE_VERSION, "normalized_row_counts": normalized_counts,
         "imported_at": datetime.now(timezone.utc).isoformat(),
-        "sources": [{"source_file": str(p.relative_to(ROOT)) if p.is_relative_to(ROOT) else p.name, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in sources],
+        "sources": retained,
         "schema_sha256": hashlib.sha256(json.dumps(SCHEMA, sort_keys=True).encode()).hexdigest(),
         "metadata_sha256": metadata_hash(),
         "row_counts": {table: len(tables[table]) for table in SCHEMA}, "quality": quality,
@@ -77,7 +124,9 @@ def import_tables(dataset_id: str, tables: dict, sources: list, name: str, data_
         "practice": practice or {"year_context": 2025, "min_seller_orders": 10 if dataset_id == "excel_full" else 3, "questions": tables.get("practice_questions", [])},
     }
     manifest["database_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-    (data_dir / f"{dataset_id}.manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    pending = data_dir / f"{dataset_id}.manifest.tmp"
+    pending.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    pending.replace(data_dir / f"{dataset_id}.manifest.json")
     return manifest
 
 

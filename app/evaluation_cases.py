@@ -78,6 +78,11 @@ def cases_for(manifest: dict, suite: str) -> list[EvaluationCase]:
 
 def assert_plan(actual: AnalysisPlan, expected: AnalysisPlan) -> None:
     assert actual.intent == expected.intent, f"意图：{actual.intent} != {expected.intent}"
+    if expected.intent == "workflow":
+        assert len(actual.steps) == len(expected.steps), "工作流步骤数量不符"
+        for actual_step, expected_step in zip(actual.steps, expected.steps):
+            assert_plan(actual_step, expected_step)
+        return
     if expected.intent in {"clarify", "unsupported"}:
         assert actual.clarification
         if expected.missing_slots:
@@ -86,7 +91,7 @@ def assert_plan(actual: AnalysisPlan, expected: AnalysisPlan) -> None:
     if expected.intent == "explain":
         assert actual.explanation_topic == expected.explanation_topic
         return
-    for field in ["dataset_id", "metadata_version", "dimension", "time_range", "comparison_range", "min_group_count", "time_field", "order_statuses"]:
+    for field in ["dataset_id", "metadata_version", "dimension", "time_range", "comparison_range", "min_group_count", "time_field", "order_statuses", "order_where", "item_where", "selected_order_id", "detail_level", "source_step", "bind_field", "source_row"]:
         assert getattr(actual, field) == getattr(expected, field), f"{field}: {getattr(actual, field)} != {getattr(expected, field)}"
     assert set(expected.metric_ids) <= set(actual.metric_ids), f"指标：{actual.metric_ids} != {expected.metric_ids}"
     assert {f.field: set(f.values) for f in actual.filters} == {f.field: set(f.values) for f in expected.filters}, "过滤条件不符"

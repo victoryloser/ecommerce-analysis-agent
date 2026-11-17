@@ -42,7 +42,7 @@ def load_manifest(dataset_id: str, data_dir: Path = DATA_DIR) -> dict:
 def catalog(manifest: dict) -> dict:
     return {
         "dataset_id": manifest["dataset_id"], "metadata_version": METADATA_VERSION,
-        "coverage": manifest["coverage"], "metrics": {m: {"summary": description, "aliases": METRIC_DETAILS[m]["aliases"]} for m, description in METRICS.items()},
+        "coverage": manifest["coverage"], "metrics": {m: {"summary": description, **metric_detail(m)} for m, description in METRICS.items()},
         "coverage_fields": manifest.get("coverage_fields", {"purchase_at": manifest["coverage"]}),
         "dimensions": ["total", "month", "category", "seller", "delivery_status", "customer_state"],
         "entities": manifest["entities"], "relationships": RELATIONSHIPS,
@@ -55,7 +55,7 @@ def catalog(manifest: dict) -> dict:
             "contribution": "单一可加金额sales/payment_amount，非total/month维度，按变化额排名并计算对净增长的贡献率；不分摊支付",
             "details": "orders/items/payments/reviews明细；可按selected_order_id选择订单",
             "diagnose": "reconciliation支付与商品加运费对账、quality质量、sales_spike月销售突变、seller_outlier商家延迟率偏离",
-            "workflow": "最多4个明确步骤，允许聚合/比较/贡献/诊断/明细及解释；不允许嵌套",
+            "workflow": "最多6个步骤；可独立执行、澄清、标明不支持；逐步保存及续算，不嵌套",
             "history": "检索已保存会话，history_query为内容，history_start/end按会话更新时间左闭右开筛选",
             "predicates": "order_where用于订单粒度（order_sales/order_freight为完整订单金额），item_where用于明细粒度；分别支持all/any/negate与比较/IN/NOT IN/BETWEEN/空值",
             "rank": "非total维度，按第一个指标降序；按订单数门槛过滤，并保留边界并列",
@@ -64,7 +64,12 @@ def catalog(manifest: dict) -> dict:
 
 
 def get_catalog(manifest: dict, plan: AnalysisPlan) -> dict:
-    tables = required_tables(plan.metric_ids, plan.dimension, [f.field for f in plan.filters], plan.intent)
+    def fields(node):
+        return ([node.field] if node.field else []) + [field for child in node.children for field in fields(child)] if node else []
+    used = [f.field for f in plan.filters] + fields(plan.order_where) + fields(plan.item_where)
+    tables = required_tables(plan.metric_ids, plan.dimension, used, plan.intent)
+    for step in plan.steps:
+        tables.update(get_catalog(manifest, step)["tables"])
     if plan.explanation_topic == "joins":
         tables.update({"orders", "order_items", "order_payments"})
     if plan.intent in {"details", "diagnose"}:
@@ -89,7 +94,7 @@ def validate_workflow(plan: AnalysisPlan, manifest: dict) -> None:
         raise PlanError("多步骤分析必须提供steps")
     for index, step in enumerate(plan.steps, 1):
         intent = step.pending_intent if step.intent == "clarify" else step.intent
-        if intent not in {*get_args(AnalysisIntent), "explain"}:
+        if intent not in {*get_args(AnalysisIntent), "explain", "unsupported"}:
             raise PlanError("工作流步骤必须是分析、解释或保留分析意图的澄清，不嵌套工作流")
         if step.source_step and (step.source_step >= index or not step.bind_field):
             raise PlanError("依赖步骤必须引用前面的步骤并声明bind_field")

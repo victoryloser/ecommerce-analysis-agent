@@ -4,7 +4,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
-from app.config import ROOT
+from app.config import ROOT, DATA_DIR
 
 SCHEMA = {
     "customers": {"customer_id": "VARCHAR", "customer_unique_id": "VARCHAR", "customer_zip_code": "VARCHAR", "customer_city": "VARCHAR", "customer_state": "VARCHAR"},
@@ -41,7 +41,11 @@ def source_files(dataset_id: str) -> list[Path]:
     raise ValueError(f"未知数据集：{dataset_id}")
 
 
-def read_source(dataset_id: str) -> dict[str, list[dict]]:
+def read_source(dataset_id: str, data_dir=DATA_DIR) -> dict[str, list[dict]]:
+    if dataset_id not in {"csv_small", "excel_full"}:
+        from app.semantic import load_manifest
+        from app.snapshots import read_retained
+        return read_retained(load_manifest(dataset_id, data_dir), data_dir)
     if dataset_id == "csv_small":
         tables = {}
         for path in source_files(dataset_id):

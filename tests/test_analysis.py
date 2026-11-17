@@ -26,8 +26,8 @@ def test_join_explanation_has_no_query(executor):
     assert "N×M" in text and "分别按订单汇总" in text
 
 
-def test_independent_control_values(dataset, expected):
-    count, sales = {"excel_full": (10714, "4858920.84"), "csv_small": (159, "75484.21")}[dataset]
+def test_independent_control_values(dataset, expected, executor):
+    count, sales = {"excel_full": (10714, "4858920.84"), "csv_small": (159, "75484.21")}[executor.manifest.get("source_kind") or dataset]
     assert expected["Q01"] == count
     assert expected["Q02"] == Decimal(sales)
 

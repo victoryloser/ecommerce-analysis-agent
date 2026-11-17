@@ -48,8 +48,8 @@ def bind_entities(plan: AnalysisPlan, manifest: dict, question: str = "") -> Ana
     if plan.intent == "workflow" or (plan.intent == "clarify" and plan.pending_intent == "workflow"):
         steps = [bind_entities(step, manifest, question) for step in plan.steps]
         active = next(((index, step) for index, step in enumerate(steps, 1) if step.intent == "clarify"), None)
-        return plan.model_copy(update={"steps": steps, "intent": "clarify" if active else "workflow",
-            "pending_intent": "workflow" if active else None,
+        return plan.model_copy(update={"steps": steps, "intent": "workflow",
+            "pending_intent": None,
             "clarification": f"步骤{active[0]}：{active[1].clarification}" if active else None,
             "missing_slots": [], "entity_candidates": [], "ambiguous_value": None})
     intent = plan.pending_intent if plan.intent == "clarify" else plan.intent

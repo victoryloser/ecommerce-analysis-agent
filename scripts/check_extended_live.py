@@ -48,7 +48,9 @@ def main():
         "total":16,"completed":0,"passed":0,"status":"running","cases":cases}
     path=RUNS_DIR/f"extended-live-{uuid4().hex}.json"
     store=SessionStore(RUNS_DIR/f"extended-memory-{uuid4().hex}.sqlite3")
+    from app.snapshots import resolve_dataset
     for dataset in DATASETS:
+        dataset = resolve_dataset(dataset)
         executor=Executor(dataset)
         oracle=SourceOracle(dataset)
         agent=AnalysisAgent(provider,{dataset:executor},store)

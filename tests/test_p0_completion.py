@@ -32,7 +32,7 @@ def test_selected_metadata_contains_dependencies_not_unrelated_tables(executor):
     plan = practice_plans(executor.manifest)["Q06"]
     summary = catalog(executor.manifest)
     detail = get_catalog(executor.manifest, plan)
-    assert "expression" not in summary["metrics"]["avg_review"]
+    assert summary["metrics"]["avg_review"]["expression"] == detail["metrics"]["avg_review"]["expression"]
     assert detail["metrics"]["avg_review"]["dependencies"] == ["order_reviews.review_score"]
     assert "order_reviews" in detail["tables"] and "order_payments" not in detail["tables"]
     assert detail["tables"]["customers"]["fields"]["customer_unique_id"]["meaning"]
@@ -91,9 +91,9 @@ def test_full_round_budget_stops_repeated_catalog_requests(executor):
     request = practice_plans(executor.manifest)["Q01"].model_copy(update={"intent": "load_catalog"})
     provider = ScriptedProvider([request] * 5)
     session = Session(request.dataset_id)
-    with pytest.raises(ValueError, match="8次"):
-        AnalysisAgent(provider, {session.dataset_id: executor}).respond(session, "全期订单数")
-    assert provider.calls == 4 and session.last_successful_plan is None
+    turn = AnalysisAgent(provider, {session.dataset_id: executor}).respond(session, "全期订单数")
+    assert "catalog 上限1" in turn.text
+    assert provider.calls == 2 and session.last_successful_plan is None
 
 
 def test_http_failure_is_logged_and_reraised_without_credentials(executor):
@@ -117,7 +117,7 @@ def test_http_failure_is_logged_and_reraised_without_credentials(executor):
 
 @pytest.mark.parametrize("qid,old,new", [
     ("Q01", "COUNT(DISTINCT order_id)", "COUNT(order_id)"),
-    ("Q01", "o.order_status='delivered'", "o.order_status='canceled'"),
+    ("Q01", "o.order_status IN (?)", "o.order_status NOT IN (?)"),
     ("Q02", "o.purchase_at", "o.delivered_at"),
     ("Q05", "rank_no<=1", "rank_no<=10"),
     ("Q05", "RANK()", "ROW_NUMBER()"),

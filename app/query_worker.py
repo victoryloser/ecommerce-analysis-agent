@@ -9,6 +9,7 @@ import duckdb
 from app.config import MAX_ROWS, QUERY_TIMEOUT
 from app.models import QueryResult
 from app.sql_compiler import CompiledQuery
+from app.quality import decode_quality
 
 
 def _query(path: str, compiled: CompiledQuery, pipe, offset=0, limit=MAX_ROWS, export_path=None) -> None:
@@ -34,7 +35,8 @@ def _query(path: str, compiled: CompiledQuery, pipe, offset=0, limit=MAX_ROWS, e
                 else:
                     cursor = conn.execute(compiled.sql, compiled.parameters)
                 rows = cursor.fetchmany(limit + 1)
-                pipe.send({"columns": [col[0] for col in cursor.description], "rows": rows[:limit], "truncated": len(rows) > limit, "row_offset": offset})
+                columns, visible, quality = decode_quality([col[0] for col in cursor.description], rows[:limit])
+                pipe.send({"columns": columns, "rows": visible, "quality": quality, "truncated": len(rows) > limit, "row_offset": offset})
     except duckdb.Error as error:
         # 数据库错误跨进程传回；不改 SQL、不换库、不返回伪造的 0。
         pipe.send({"error": str(error)})

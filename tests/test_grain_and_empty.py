@@ -56,7 +56,9 @@ def query(executor, **updates):
 
 def test_multi_item_multi_payment_stays_at_order_grain(small_executor):
     result = query(small_executor, metric_ids=["sales", "order_count", "payment_amount"])
-    assert result.rows == [[Decimal("100.00"), 3, Decimal("100.00")]]
+    assert result.rows == [[Decimal("100.00"), 3, None]]
+    assert result.quality[0]["payment_amount"]["known_value"] == 100
+    assert result.quality[0]["payment_amount"]["missing_record_count"] == 1
 
 
 def test_seller_orders_are_deduplicated_but_sales_keep_ownership(small_executor):

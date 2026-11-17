@@ -2,23 +2,32 @@
 from app.source import FOREIGN_KEYS, PRIMARY_KEYS, SCHEMA
 
 DIMENSIONS = ["total", "month", "category", "seller", "delivery_status", "customer_state"]
+COMPARISON_METRICS = {
+    "sales": {"key": ["order_id", "order_item_id", "entity_id"], "bridge": "共同明细修订＋进入金额－退出金额", "additive_groups": True},
+    "payment_amount": {"key": ["order_id"], "bridge": "整单完整支付额；不分摊品类/商家", "additive_groups": True},
+    "order_count": {"key": ["order_id", "entity_id"], "bridge": "分组内去重入选集合", "additive_groups": False},
+    "repeat_customers": {"key": ["customer_unique_id"], "bridge": "两侧重新判定复购资格", "additive_groups": False},
+    "delay_rate": {"key": ["order_id", "entity_id"], "bridge": "两侧重算延迟订单数与有效订单数", "additive_groups": False},
+    "avg_review": {"key": ["order_id", "entity_id"], "bridge": "两侧重算有评价样本与评分", "additive_groups": False},
+    "low_score_rate": {"key": ["order_id", "entity_id"], "bridge": "两侧重算低分订单数与有评价样本", "additive_groups": False},
+}
 EXPRESSIONS = {
-    "sales": "COALESCE(SUM(sales), 0)",
-    "order_count": "COUNT(DISTINCT order_id)",
-    "payment_amount": "COALESCE(SUM(payment_amount), 0)",
+    "sales": "完整金额仅在金额成分及筛选归属已确认时计算；已确认明细 price 单独求和",
+    "order_count": "分组内确定匹配 order_id 去重；有未知归属时完整订单数为 NULL",
+    "payment_amount": "支付先按订单汇总；缺整单记录、未知金额或归属时完整金额为 NULL，已确认小计单列",
     "delay_rate": "CASE WHEN COUNT(*) FILTER (WHERE delivered_at IS NULL OR estimated_delivery_at IS NULL)>0 THEN NULL ELSE CAST(COUNT(*) FILTER (WHERE delivered_at>estimated_delivery_at) AS DOUBLE)/NULLIF(COUNT(*),0) END",
     "avg_review": "AVG(review_score)",
     "low_score_rate": "CAST(COUNT(*) FILTER (WHERE review_score<=2) AS DOUBLE)/NULLIF(COUNT(review_score),0)",
     "repeat_customers": "COUNT(*) FILTER (WHERE n>=2)",
 }
 METRIC_DETAILS = {
-    "sales": {"aliases": ["商品销售额", "商品价款", "销售额"], "dependencies": ["order_items.price"], "grain": "订单—目标明细维度", "unit": "元", "denominator": None, "missing": "无记录为0；不含运费"},
+    "sales": {"aliases": ["商品销售额", "商品价款", "销售额"], "dependencies": ["order_items.price"], "grain": "订单—目标明细维度", "unit": "元", "denominator": None, "missing": "确定无匹配为0；金额或归属未知时完整值NULL，另报已确认小计；不含运费"},
     "order_count": {"aliases": ["订单数", "已送达订单数"], "dependencies": ["orders.order_id"], "grain": "分组内去重订单", "unit": "笔", "denominator": None, "missing": "无订单为0"},
     "delay_rate": {"aliases": ["延迟率", "晚到比例"], "dependencies": ["orders.order_id", "orders.delivered_at", "orders.estimated_delivery_at"], "grain": "订单—目标维度", "unit": "比例", "denominator": "分组内已送达订单数", "missing": "履约时间缺失时该组比例为NULL，并报告缺失数"},
     "avg_review": {"aliases": ["平均评分", "平均评价"], "dependencies": ["order_reviews.review_score"], "grain": "有评价的已送达订单", "unit": "分", "denominator": "有评价订单数", "missing": "未评价不记0；一单多评价必须先明确口径"},
     "low_score_rate": {"aliases": ["低分率", "差评率"], "dependencies": ["order_reviews.review_score"], "grain": "有评价的已送达订单", "unit": "比例", "denominator": "有评价订单数", "missing": "无评价为NULL；低分是评分≤2"},
     "repeat_customers": {"aliases": ["复购客户数", "回头客", "复购自然客户"], "dependencies": ["customers.customer_unique_id", "orders.order_id"], "grain": "统计期内自然客户", "unit": "人", "denominator": None, "missing": "无复购为0；至少2笔已送达订单"},
-    "payment_amount": {"aliases": ["支付金额", "支付额"], "dependencies": ["order_payments.payment_value"], "grain": "先按订单汇总支付", "unit": "元", "denominator": None, "missing": "无支付记录为0；无商家/品类分摊规则"},
+    "payment_amount": {"aliases": ["支付金额", "支付额"], "dependencies": ["order_payments.payment_value"], "grain": "先按订单汇总支付", "unit": "元", "denominator": None, "missing": "整单缺支付或金额冲突时完整值NULL，已确认小计单列；无分摊规则；金额IS NULL表示完整值不可确认"},
 }
 TABLE_GRAINS = {"orders": "订单", "customers": "客户记录，customer_unique_id才是自然客户", "order_items": "订单商品明细", "order_payments": "订单支付记录", "order_reviews": "评价记录", "products": "商品", "sellers": "商家", "categories": "品类", "geolocation": "邮编"}
 FIELD_MEANINGS = {
@@ -60,10 +69,10 @@ def required_tables(metric_ids: list[str], dimension: str, filter_fields: list[s
     if intent == "join_example":
         return {"orders", "order_items", "order_payments"}
     tables = {"orders", "customers"}
-    if "sales" in metric_ids or dimension in {"seller", "category"} or set(filter_fields) & {"seller_id", "category_id"}:
+    if "sales" in metric_ids or dimension in {"seller", "category"} or set(filter_fields) & {"seller_id", "category_id", "product_id", "price", "freight_value", "order_sales", "order_freight"}:
         tables.update({"order_items", "products", "categories", "sellers"})
-    if "payment_amount" in metric_ids:
+    if "payment_amount" in metric_ids or "payment_amount" in filter_fields:
         tables.add("order_payments")
-    if set(metric_ids) & {"avg_review", "low_score_rate"}:
+    if set(metric_ids) & {"avg_review", "low_score_rate"} or "review_score" in filter_fields:
         tables.add("order_reviews")
     return tables

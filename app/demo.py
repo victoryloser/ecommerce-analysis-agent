@@ -31,6 +31,8 @@ def main():
     parser.add_argument("--dataset", choices=[*DATASETS, "all"], default="all")
     args = parser.parse_args()
     for dataset in DATASETS if args.dataset == "all" else [args.dataset]:
+        from app.snapshots import resolve_dataset
+        dataset = resolve_dataset(dataset)
         executor = Executor(dataset)
         session = Session(dataset)
         for question in executor.manifest["practice"]["questions"]:

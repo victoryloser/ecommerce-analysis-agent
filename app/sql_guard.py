@@ -6,7 +6,7 @@ from sqlglot.optimizer.qualify import qualify
 from app.source import SCHEMA
 
 # 编译器需要的函数；没有文件、网络、动态 SQL、扩展或任意表达式入口。
-FUNCTIONS = {"SUM", "COUNT", "AVG", "COALESCE", "NULLIF", "CAST", "CASE", "IF", "TIME_TO_STR", "RANK", "EXISTS", "AND", "OR"}
+FUNCTIONS = {"SUM", "COUNT", "AVG", "COALESCE", "NULLIF", "CAST", "CASE", "IF", "TIME_TO_STR", "RANK", "EXISTS", "AND", "OR", "J_S_O_N_OBJECT", "JSON_EXTRACT", "JSON_FORMAT", "CONCAT_WS"}
 EXPLORATION_FUNCTIONS = FUNCTIONS | {
     "MIN", "MAX", "ABS", "ROUND", "CEIL", "FLOOR", "POWER", "SQRT", "MOD",
     "ROW_NUMBER", "DENSE_RANK", "LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE", "NTILE",

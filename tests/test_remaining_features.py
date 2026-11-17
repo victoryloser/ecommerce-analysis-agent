@@ -46,9 +46,10 @@ def test_workflow_runs_queries_then_explains_from_same_evidence(executor, tmp_pa
     assert turn.evidence["steps"][0]["result"]["status"] == "ok"
     assert turn.evidence["steps"][2]["result"] is None
     assert "没有促销" in turn.text
-    assert display_evidence(turn.evidence)["plan"]["intent"] == "contribution"
+    assert display_evidence(turn.evidence)["plan"]["intent"] == "compare"
     restored = store.load(session.session_id, executor.manifest)
-    assert restored.last_evidence["type"] == "workflow" and restored.last_successful_plan == contribution
+    assert restored.last_evidence["type"] == "workflow" and restored.last_successful_plan == comparison
+    assert restored.working_plan == workflow and restored.focus_step == 1
 
 
 def test_history_search_retrieves_old_turn_beyond_prompt_window(executor, tmp_path):

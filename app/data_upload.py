@@ -54,7 +54,7 @@ def suggest_mapping(structure: dict) -> dict:
     return result
 
 
-def import_upload(files: list[str], mapping: dict, name: str, data_dir: Path = DATA_DIR) -> dict:
+def import_upload(files: list[str], mapping: dict, name: str, data_dir: Path = DATA_DIR, **version) -> dict:
     if set(mapping["tables"]) != set(SCHEMA):
         raise ValueError("经营分析需要完整9张业务表；请在映射中明确每张表，不能用合成空表补齐")
     paths = {Path(filename).name: Path(filename) for filename in files}
@@ -86,10 +86,12 @@ def import_upload(files: list[str], mapping: dict, name: str, data_dir: Path = D
         shutil.copyfile(path, target)
         copied.append(target)
     (directory / "mapping.json").write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
-    return import_tables(dataset_id, tables, copied, name or dataset_id, data_dir,
-                         practice={"year_context": None, "min_seller_orders": 1, "questions": []})
+    return import_tables(dataset_id, tables, [*copied, directory / "mapping.json"], name or dataset_id, data_dir,
+                         practice={"year_context": None, "min_seller_orders": 1, "questions": []},
+                         **({"data_origin": "uploaded"} | version))
 
 
 def registered_datasets(data_dir: Path = DATA_DIR) -> dict[str, str]:
-    return {manifest["dataset_id"]: manifest["name"] for path in sorted(data_dir.glob("*.manifest.json"))
-            for manifest in [json.loads(path.read_text(encoding="utf-8"))]}
+    manifests = [json.loads(path.read_text(encoding="utf-8")) for path in data_dir.glob("*.manifest.json")]
+    return {m["dataset_id"]: m["name"] + (" · " + m["dataset_id"][-6:] if m.get("source_kind") else "")
+            for m in sorted(manifests, key=lambda m: m.get("imported_at", ""), reverse=True)}

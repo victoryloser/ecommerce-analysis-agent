@@ -12,6 +12,7 @@ from app.session import Session
 from app.sql_compiler import CompiledQuery, compile_query
 from app.sql_guard import validate_sql
 from app.sql_audit import audit_query
+from app.quality import QUERY_SCHEMA
 
 
 class Executor:
@@ -39,7 +40,7 @@ class Executor:
         if trace:
             trace.record("sql_compiled", sql=compiled.sql, parameters=compiled.parameters)
         from app.advanced import extended
-        validate_sql(compiled.sql, exploration=extended(plan))
+        validate_sql(compiled.sql, schema=QUERY_SCHEMA, exploration=extended(plan))
         audit_query(plan, compiled)
         if trace:
             trace.record("sql_approved")

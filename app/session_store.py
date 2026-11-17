@@ -13,7 +13,7 @@ from app.session import Session
 
 
 def snapshot_identity(manifest: dict) -> dict:
-    return {key: manifest[key] for key in ("dataset_id", "metadata_sha256", "schema_sha256", "sources")}
+    return {key: manifest.get(key) for key in ("dataset_id", "metadata_sha256", "schema_sha256", "sources", "database_sha256", "quality_rule_version")}
 
 
 class SessionStore:
@@ -39,14 +39,19 @@ class SessionStore:
             conn.execute("DELETE FROM memories WHERE session_id=?", (session_id,))
         for index in range(0, len(transcript) - 1, 2):
             evidence_id = state["last_evidence"].get("record_id") if index == len(transcript) - 2 else None
+            comparison = state.get("comparison_state", {})
+            if comparison.get("transcript_turn_index") == index // 2:
+                evidence_id = comparison["artifact_id"]
             conn.execute("INSERT OR IGNORE INTO memories VALUES(?,?,?,?,?,?)",
                          (session_id, index // 2, timestamp, transcript[index]["content"], transcript[index+1]["content"], evidence_id))
 
     def save(self, session: Session, manifest: dict) -> None:
         state = {"history": session.history, "transcript": session.transcript,
                  "last_evidence": session.last_evidence, "analysis_evidence": session.analysis_evidence,
-                 "drill_stack": session.drill_stack, "sql_state": session.sql_state, "workflow_evidence": session.workflow_evidence}
-        for name in ("last_successful_plan", "pending_plan", "last_result"):
+                 "drill_stack": session.drill_stack, "sql_state": session.sql_state, "workflow_evidence": session.workflow_evidence,
+                 "focus_step": session.focus_step, "workflow_tasks": session.workflow_tasks,
+                 "comparison_state": session.comparison_state}
+        for name in ("last_successful_plan", "pending_plan", "last_result", "working_plan"):
             value = getattr(session, name)
             state[name] = value.model_dump(mode="json") if value else None
         title = (session.transcript[0]["content"] if session.transcript else session.sql_state.get("question", "新会话"))[:60]
@@ -66,8 +71,8 @@ class SessionStore:
         if json.loads(row[1]) != snapshot_identity(manifest):
             raise ValueError("会话绑定的数据或元数据已改变，请使用原数据恢复或新建会话")
         state = json.loads(row[2])
-        for name in ("last_successful_plan", "pending_plan"):
-            state[name] = AnalysisPlan.model_validate(state[name]) if state[name] else None
+        for name in ("last_successful_plan", "pending_plan", "working_plan"):
+            state[name] = AnalysisPlan.model_validate(state[name]) if state.get(name) else None
         state["last_result"] = QueryResult.model_validate(state["last_result"]) if state["last_result"] else None
         # 执行授权不持久化，恢复后每次查询重新登记和审计。
         return Session(dataset_id=row[0], session_id=session_id, **state)

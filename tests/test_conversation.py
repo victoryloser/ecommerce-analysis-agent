@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from pydantic import ValidationError
+from app.semantic import PlanError
 
 from app.demo import practice_plans
 from app.models import TimeRange
@@ -63,7 +63,7 @@ def test_clarification_then_completed_plan(executor):
 
 def test_structure_repair_is_bounded(executor):
     provider = ScriptedProvider(["not json"] * 3)
-    with pytest.raises(ValidationError):
+    with pytest.raises(PlanError, match="三次"):
         make_plan(provider, executor.manifest, Session(executor.manifest["dataset_id"]), "销售额", False, TurnTrace("format-test", executor.manifest["dataset_id"], "销售额", provider.model))
     assert len(provider.inputs) == 3
 
