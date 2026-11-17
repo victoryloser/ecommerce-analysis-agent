@@ -298,7 +298,7 @@ def test_runner_accepts_unchanged_same_session_workflow_evidence(synthetic, isol
     assert not lineage(previous["evidence_records"])
 
 
-@pytest.mark.parametrize("malformation", ["remove_limit", "outer_period", "outer_top_n", "outer_metrics"])
+@pytest.mark.parametrize("malformation", ["remove_limit", "outer_period", "outer_top_n", "outer_metrics", "output_as_intent"])
 def test_update_format_repair_precedes_queries(synthetic, isolated_runs, malformation):
     from app.models import AnalysisPlan, PlanUpdate
     from app.trace import TurnTrace
@@ -315,9 +315,11 @@ def test_update_format_repair_precedes_queries(synthetic, isolated_runs, malform
     elif malformation == "outer_top_n":
         malformed["top_n"] = 3
         corrected.updates.append(PlanUpdate(operation="set", field="top_n", values=[3]))
-    else:
+    elif malformation == "outer_metrics":
         malformed["metric_ids"] = ["order_count"]
         corrected.updates.append(PlanUpdate(operation="set", field="metric_ids", values=["order_count"]))
+    else:
+        malformed["updates"][1]["values"] = ["customer_summary"]
     class Repair:
         model = "format-repair-test"
         def __init__(self):
@@ -356,3 +358,44 @@ def test_invalid_update_structure_still_stops_after_three_calls(synthetic, isola
     assert "连续三次" in turn.text
     assert trace.counts()["model_calls"] == 3 and trace.counts()["query_calls"] == 0
     assert session.working_plan.model_dump() == before
+
+
+def test_continue_with_new_output_repairs_to_update(synthetic, isolated_runs):
+    from app.models import AnalysisPlan
+    from app.trace import TurnTrace
+    executor, oracle = synthetic
+    session = Session(executor.manifest["dataset_id"], working_plan=contract(executor.manifest, "B1"))
+    corrected = AnalysisPlan(dataset_id=session.dataset_id, metadata_version=executor.manifest["metadata_version"],
+                             intent="update", scope_source="analysis", output_mode="quality_check")
+    class Repair:
+        model = "continue-repair-test"
+        def __init__(self):
+            self.calls = 0
+        def complete(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                raw = corrected.model_dump(mode="json")
+                raw["intent"] = "continue"
+                return json.dumps(raw)
+            assert "只继续原任务" in messages[-1]["content"]
+            return corrected.model_dump_json()
+    provider = Repair()
+    trace = TurnTrace(session.session_id, session.dataset_id, "查刚才两个月的质量问题", provider.model)
+    turn = AnalysisAgent(provider, {session.dataset_id: executor}).respond(session, "查刚才两个月的质量问题", trace=trace)
+    assert provider.calls == 2 and trace.counts()["query_calls"] == 2
+    assert judge("B2", executor.manifest, oracle, turn.evidence, turn.text, turn_id=trace.turn_id)["passed"]
+
+
+def test_update_quality_options_control_actual_period_and_types(synthetic, isolated_runs):
+    from app.models import AnalysisPlan, QueryResult
+    from app.round2_judge import compare_rows
+    executor, oracle = synthetic
+    session = Session(executor.manifest["dataset_id"], working_plan=contract(executor.manifest, "B1"))
+    update = AnalysisPlan(dataset_id=session.dataset_id, metadata_version=executor.manifest["metadata_version"],
+                          intent="update", scope_source="analysis", output_mode="quality_check",
+                          quality_scope="previous", quality_types=["missing_payment"])
+    turn = AnalysisAgent(Scripted(update), {session.dataset_id: executor}).respond(session, "只查上月支付缺失")
+    for record in turn.evidence["steps"]:
+        plan = AnalysisPlan.model_validate(record["plan"])
+        assert plan.quality_scope == "previous" and plan.quality_types == ["missing_payment"]
+        compare_rows(QueryResult.model_validate(record["result"]), oracle.evaluate(plan, with_quality=True))

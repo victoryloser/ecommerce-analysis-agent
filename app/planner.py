@@ -56,8 +56,9 @@ metadata中没有促销等数据，不能臆造字段或作因果结论。不要
 3. updates中set intent仅用于aggregate/rank/compare/contribution/details/diagnose；不可set workflow。修改工作流组织直接用output_mode或完整workflow计划，不能将intent=update与steps混写。
 4. 两个月总体比较用compare+dimension="total"；月份是期间参数，不是分组维度。
 5. limit_mode、dimension、metric_ids、intent等结果设置只能set并提供values，不能remove。set intent=aggregate已自动将limit_mode重置为top_n，无需再删除limit_mode。
-6. intent=update时，所有业务变化都放入updates：日期用period，top_n、metric_ids等用values。顶层只保留dataset_id、metadata_version、intent、updates、scope_source、output_mode、limitations，不要重复填写顶层日期、top_n或指标。用户明确给出月份时，即使上一轮失败，也要在updates中设置该期间。
+6. intent=update时，业务变化放入updates：日期用period，top_n、metric_ids等用values。顶层只保留dataset_id、metadata_version、intent、updates、scope_source、output_mode、limitations；quality_check模式还可在顶层指定quality_scope和quality_types。不要重复填写顶层日期、top_n或指标。用户明确给出月份时，即使上一轮失败，也要在updates中设置该期间。
 7. 质量查验后重新提问业务汇总，使用scope_source=analysis继承父分析，再修改时间和品类；不要只修改quality_check工作流的一个步骤并继续展示旧查验范围。
+8. intent=continue仅继续原任务，不附加output_mode或新的业务条件；继承刚才范围做质量查验仍用intent=update、scope_source=analysis、output_mode=quality_check、updates=[]。
 """
 
 
@@ -127,10 +128,11 @@ def make_plan(provider: Provider, manifest: dict, session: Session, question: st
             if base is None or (not changes and plan.output_mode == "analysis"):
                 raise PlanError("请先指定分析，再修改条件")
             mode, limitations, scope_source = plan.output_mode, plan.limitations, plan.scope_source
+            quality_options = {"quality_scope": plan.quality_scope, "quality_types": plan.quality_types} if mode == "quality_check" else {}
             if mode != "analysis" and base.intent == "workflow":
                 base = base.model_copy(update={"intent": "aggregate", "steps": [], "output_mode": "analysis"})
             plan = apply_updates(base, changes, manifest, session.workflow_tasks, session.focus_step)
-            plan = plan.model_copy(update={"output_mode": plan.output_mode if mode == "analysis" and plan.intent == "workflow" else mode, "limitations": limitations})
+            plan = plan.model_copy(update={"output_mode": plan.output_mode if mode == "analysis" and plan.intent == "workflow" else mode, "limitations": limitations, **quality_options})
             trace.record("conditions_updated", scope_source=scope_source,
                          source_record_id=(session.analysis_anchor if scope_source == "analysis" else
                                            session.view_focus.get("record_id") if scope_source == "view" else

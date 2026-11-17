@@ -90,8 +90,6 @@ def apply_update(plan: AnalysisPlan, update: PlanUpdate, manifest: dict, tasks=N
         if field == "dimension":
             changes.update(group_by=None, rank_within=None, contribution_within=None)
         if field == "intent":
-            if update.values[0] not in {"aggregate", "rank", "compare", "contribution", "details", "diagnose"}:
-                raise PlanError("结果意图只能选择已支持的分析类型")
             if update.values[0] not in {"compare", "contribution"}:
                 changes.update(comparison_range=None, comparison_mode="none", contribution_within=None)
             if update.values[0] != "rank":

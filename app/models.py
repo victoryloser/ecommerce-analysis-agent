@@ -60,6 +60,8 @@ class PlanUpdate(Contract):
         if self.operation != "reset" and self.field in {"dimension", "metric_ids", "order_statuses", "time_field", "contribution_direction", "intent", "top_n", "min_group_count", "detail_level", "limit_mode"}:
             if self.operation != "set" or not self.values:
                 raise ValueError(f"{self.field} 需要operation=set并提供values；set intent=aggregate会自动重置limit_mode，无需删除limit_mode")
+            if self.field == "intent" and self.values[0] not in {"aggregate", "rank", "compare", "contribution", "details", "diagnose"}:
+                raise ValueError("intent更新只接受aggregate/rank/compare/contribution/details/diagnose；customer_summary、seller_audit、quality_check是顶层output_mode，不是intent值")
         return self
 
 
@@ -120,12 +122,18 @@ class AnalysisPlan(Contract):
     def normalize_grouping(self):
         if self.update is not None and self.updates:
             raise ValueError("update 与 updates 不能同时提供")
-        if self.intent == "update":
-            controls = {"dataset_id", "metadata_version", "intent", "update", "updates", "scope_source", "output_mode", "limitations"}
+        if self.intent in {"update", "continue"}:
+            controls = {"dataset_id", "metadata_version", "intent"}
+            if self.intent == "update":
+                controls |= {"update", "updates", "scope_source", "output_mode", "limitations"}
+                if self.output_mode == "quality_check":
+                    controls |= {"quality_scope", "quality_types"}
             misplaced = [name for name, field in type(self).model_fields.items()
                          if name not in controls and getattr(self, name) != field.get_default(call_default_factory=True)]
             if misplaced:
-                raise ValueError(f"intent=update的业务条件{misplaced}必须放入updates，不能放在顶层；日期用period，其他替换用values。顶层只保留数据集、版本、intent、updates、scope_source、output_mode和limitations")
+                if self.intent == "continue":
+                    raise ValueError(f"intent=continue只继续原任务，不能携带新条件或输出要求{misplaced}；修改业务或output_mode请用intent=update及updates，或输出完整的新计划")
+                raise ValueError(f"intent=update的业务条件{misplaced}不能放在顶层；PlanUpdate支持的字段放入updates（日期用period，其他替换用values），其他条件请输出完整新计划。顶层只保留数据集、版本、intent、updates、scope_source、output_mode和limitations；quality_check模式另接受quality_scope和quality_types")
         if self.group_by is not None:
             if len(set(self.group_by)) != len(self.group_by):
                 raise ValueError("分组维度不能重复")
