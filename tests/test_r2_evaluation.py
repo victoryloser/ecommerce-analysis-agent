@@ -269,12 +269,13 @@ def test_runner_two_replicates_isolate_sessions(synthetic, isolated_runs, tmp_pa
 
 
 def test_runner_accepts_unchanged_same_session_workflow_evidence(synthetic, isolated_runs, tmp_path):
-    from app.models import PlanUpdate
+    from app.models import AnalysisPlan, PlanUpdate
     executor, oracle = synthetic
-    third = contract(executor.manifest, "B3").model_copy(update={"intent": "update", "time_range": None, "limitations": ["profit"],
-        "updates": [PlanUpdate(operation="set", field="intent", values=["aggregate"]),
+    third = AnalysisPlan(dataset_id=executor.manifest["dataset_id"], metadata_version=executor.manifest["metadata_version"],
+        intent="update", limitations=["profit"],
+        updates=[PlanUpdate(operation="set", field="intent", values=["aggregate"]),
                     PlanUpdate(operation="set", field="metric_ids", values=["order_count", "sales", "freight"]),
-                    PlanUpdate(operation="set", field="category_id", values=["electronics"])]})
+                    PlanUpdate(operation="set", field="category_id", values=["electronics"])])
     plans = [scripted_plan(executor.manifest, c) for c in ("B1", "B2")]+[third, scripted_plan(executor.manifest, "B4")]
     cases = [Round2Case(c, "synthetic "+c) for c in CASE_IDS]
     report = evaluate_round2(Scripted(*plans), {"D1": executor}, cases, tmp_path/"reuse", selection=["D1:B"], mode="fixed-planner")
@@ -297,7 +298,7 @@ def test_runner_accepts_unchanged_same_session_workflow_evidence(synthetic, isol
     assert not lineage(previous["evidence_records"])
 
 
-@pytest.mark.parametrize("malformation", ["remove_limit", "outer_period"])
+@pytest.mark.parametrize("malformation", ["remove_limit", "outer_period", "outer_top_n", "outer_metrics"])
 def test_update_format_repair_precedes_queries(synthetic, isolated_runs, malformation):
     from app.models import AnalysisPlan, PlanUpdate
     from app.trace import TurnTrace
@@ -309,8 +310,14 @@ def test_update_format_repair_precedes_queries(synthetic, isolated_runs, malform
     malformed = corrected.model_dump(mode="json")
     if malformation == "remove_limit":
         malformed["updates"].append({"operation": "remove", "field": "limit_mode"})
-    else:
+    elif malformation == "outer_period":
         malformed["time_range"] = malformed["updates"].pop(0)["period"]
+    elif malformation == "outer_top_n":
+        malformed["top_n"] = 3
+        corrected.updates.append(PlanUpdate(operation="set", field="top_n", values=[3]))
+    else:
+        malformed["metric_ids"] = ["order_count"]
+        corrected.updates.append(PlanUpdate(operation="set", field="metric_ids", values=["order_count"]))
     class Repair:
         model = "format-repair-test"
         def __init__(self):
@@ -328,6 +335,10 @@ def test_update_format_repair_precedes_queries(synthetic, isolated_runs, malform
     assert provider.calls == 2 and trace.counts()["query_calls"] == 1
     assert turn.evidence["plan"]["time_range"] == {"start": "2027-03-01", "end": "2027-04-01"}
     assert session.working_plan.intent == "aggregate" and session.working_plan.limit_mode == "top_n"
+    if malformation == "outer_top_n":
+        assert session.working_plan.top_n == 3
+    if malformation == "outer_metrics":
+        assert session.working_plan.metric_ids == ["order_count"]
 
 
 def test_invalid_update_structure_still_stops_after_three_calls(synthetic, isolated_runs):

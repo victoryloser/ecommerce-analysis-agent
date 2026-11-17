@@ -56,7 +56,7 @@ metadata中没有促销等数据，不能臆造字段或作因果结论。不要
 3. updates中set intent仅用于aggregate/rank/compare/contribution/details/diagnose；不可set workflow。修改工作流组织直接用output_mode或完整workflow计划，不能将intent=update与steps混写。
 4. 两个月总体比较用compare+dimension="total"；月份是期间参数，不是分组维度。
 5. limit_mode、dimension、metric_ids、intent等结果设置只能set并提供values，不能remove。set intent=aggregate已自动将limit_mode重置为top_n，无需再删除limit_mode。
-6. intent=update时，期间变更必须放入updates的time_range条目及period中；最外层time_range不作为修改生效。用户明确给出月份时，即使上一轮失败，也要在updates中设置该期间。
+6. intent=update时，所有业务变化都放入updates：日期用period，top_n、metric_ids等用values。顶层只保留dataset_id、metadata_version、intent、updates、scope_source、output_mode、limitations，不要重复填写顶层日期、top_n或指标。用户明确给出月份时，即使上一轮失败，也要在updates中设置该期间。
 7. 质量查验后重新提问业务汇总，使用scope_source=analysis继承父分析，再修改时间和品类；不要只修改quality_check工作流的一个步骤并继续展示旧查验范围。
 """
 

@@ -120,8 +120,12 @@ class AnalysisPlan(Contract):
     def normalize_grouping(self):
         if self.update is not None and self.updates:
             raise ValueError("update 与 updates 不能同时提供")
-        if self.intent == "update" and (self.time_range is not None or self.comparison_range is not None):
-            raise ValueError("intent=update的日期必须写在updates对应字段的period中，删除最外层time_range/comparison_range以免日期被忽略")
+        if self.intent == "update":
+            controls = {"dataset_id", "metadata_version", "intent", "update", "updates", "scope_source", "output_mode", "limitations"}
+            misplaced = [name for name, field in type(self).model_fields.items()
+                         if name not in controls and getattr(self, name) != field.get_default(call_default_factory=True)]
+            if misplaced:
+                raise ValueError(f"intent=update的业务条件{misplaced}必须放入updates，不能放在顶层；日期用period，其他替换用values。顶层只保留数据集、版本、intent、updates、scope_source、output_mode和limitations")
         if self.group_by is not None:
             if len(set(self.group_by)) != len(self.group_by):
                 raise ValueError("分组维度不能重复")

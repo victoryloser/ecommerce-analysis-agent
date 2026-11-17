@@ -60,7 +60,7 @@ def snapshots(tmp_path_factory):
 
 def plan_for(manifest, **changes):
     return AnalysisPlan.model_validate({"dataset_id": manifest["dataset_id"], "metadata_version": manifest["metadata_version"],
-        "intent": "aggregate", "metric_ids": ["sales", "freight", "order_count"],
+        "intent": "aggregate", "metric_ids": [] if changes.get("intent") == "update" else ["sales", "freight", "order_count"],
         "time_range": None if changes.get("intent") == "update" else {"start": "2027-04-01", "end": "2027-05-01"}, **changes})
 
 
