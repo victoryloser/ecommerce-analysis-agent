@@ -144,16 +144,19 @@ def test_workflow_reselects_leader_and_fixed_result_keeps_entity(setup, tables, 
     assert fixed["stages"]["target"]["effective_plan"]["filters"][0]["values"] == ["K1"]
 
 
-def test_rules_mismatch_and_ui_comparison_without_provider(setup, monkeypatch):
+def test_rules_mismatch_and_ui_comparison_without_provider(setup, monkeypatch, tables):
     import app.ui as ui
+    from app.calculation import ROUND2_RULE
     agent, session = setup
-    agent.executors["new"].manifest["quality_rule_version"] = "different-rule"
+    directory = agent.executors["new"].path.parent
+    import_tables("formal", tables, [], "formal", directory, quality_rule_version=ROUND2_RULE)
+    agent.executors["formal"] = Executor("formal", directory)
     monkeypatch.setattr(ui, "registered_datasets", lambda: {key: key for key in agent.executors})
     monkeypatch.setattr(ui, "Executor", lambda key: agent.executors[key])
     monkeypatch.setattr(ui, "SessionStore", lambda: agent.store)
     demo = ui.build_ui()
     callback = next(fn.fn for fn in demo.fns.values() if fn.api_name == "compare_current")
-    output = callback(session, "new", "fixed_scope", "working_plan")
+    output = callback(session, "formal", "fixed_scope", "working_plan")
     assert "口径不同" in output[2]
     state = output[7]
     assert state["status"] == "completed"

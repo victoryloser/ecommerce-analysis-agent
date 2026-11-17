@@ -55,7 +55,7 @@ def check_workflow_evidence(evidence, expected, oracle):
             ranking = "rank_no" if source_plan.intent == "rank" else source_plan.metric_ids[0]+"_change" if source_plan.intent == "contribution" else None
             metric = source_plan.metric_ids[0] if source_plan.metric_ids else None
             relevant = {metric, f"{metric}_current", f"{metric}_previous"}
-            incomplete = any(q and q["completeness"] != "complete" for i, _ in indexed for name, q in (result["quality"][i] if result.get("quality") else {}).items() if name in relevant)
+            incomplete = any(q and (q.get("calculation_status", "determined" if q["completeness"] == "complete" else "insufficient_data") != "determined" or q.get("group_eligibility") == "uncertain") for i, _ in indexed for name, q in (result["quality"][i] if result.get("quality") else {}).items() if name in relevant)
             tied = ranking and (row[ranking] is None or sum(other[ranking] == row[ranking] for _, other in indexed) > 1)
             if incomplete or tied:
                 assert task["status"] == "needs_input", "未知或并列来源不应静默绑定单个实体"
@@ -105,7 +105,7 @@ def check_workflow_evidence(evidence, expected, oracle):
             for values, qualities in zip(result.rows, result.quality):
                 row = dict(zip(result.columns, values))
                 for metric, quality in qualities.items():
-                    if quality and quality["completeness"] != "complete":
+                    if quality and quality.get("calculation_status", "determined" if quality["completeness"] == "complete" else "insufficient_data") != "determined":
                         assert row[metric] is None, f"步骤{index+1}将不完整的{metric}输出为完整值"
 
 

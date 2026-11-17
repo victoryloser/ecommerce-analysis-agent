@@ -1,22 +1,24 @@
 """由指标、维度、算子组合 SQL；用户值始终通过参数绑定。"""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.models import AnalysisPlan
+from app.calculation import LEGACY_CONTEXT
 
 
 @dataclass(frozen=True)
 class CompiledQuery:
     sql: str
     parameters: tuple
+    ratios: dict = field(default_factory=dict)
 
 
-def compile_query(plan: AnalysisPlan) -> CompiledQuery:
+def compile_query(plan: AnalysisPlan, context=LEGACY_CONTEXT) -> CompiledQuery:
     from app.advanced import extended, compile_advanced
     if extended(plan):
-        return compile_advanced(plan)
+        return compile_advanced(plan, context)
     if plan.intent not in {"join_example", "compare"}:
         from app.facts import aggregate
-        return aggregate(plan)
+        return aggregate(plan, context)
     if plan.intent == "join_example":
         return CompiledQuery("""WITH item_amounts AS (
             SELECT order_id, COUNT(*) AS item_rows, CASE WHEN COUNT(*)=COUNT(price) THEN SUM(price) END AS sales FROM order_items GROUP BY order_id
@@ -31,8 +33,8 @@ def compile_query(plan: AnalysisPlan) -> CompiledQuery:
             AND i.item_rows>1 AND p.payment_rows>1
         ORDER BY o.order_id LIMIT 1""", (plan.time_range.start, plan.time_range.end))
     if plan.intent == "compare":
-        current = compile_query(plan.model_copy(update={"intent": "aggregate", "comparison_range": None}))
-        previous = compile_query(plan.model_copy(update={"intent": "aggregate", "time_range": plan.comparison_range, "comparison_range": None}))
+        current = compile_query(plan.model_copy(update={"intent": "aggregate", "comparison_range": None}), context)
+        previous = compile_query(plan.model_copy(update={"intent": "aggregate", "time_range": plan.comparison_range, "comparison_range": None}), context)
         metric = plan.metric_ids[0]
         sql = f"""SELECT c.{metric} AS current_value, p.{metric} AS previous_value,
             c.{metric}-p.{metric} AS absolute_change,
@@ -40,4 +42,4 @@ def compile_query(plan: AnalysisPlan) -> CompiledQuery:
             json_object('current_value',json_extract(c.__quality,'$.{metric}'),
                         'previous_value',json_extract(p.__quality,'$.{metric}')) AS __quality
             FROM ({current.sql}) c CROSS JOIN ({previous.sql}) p"""
-        return CompiledQuery(sql, current.parameters + previous.parameters)
+        return CompiledQuery(sql, current.parameters + previous.parameters, {"change_rate": ("absolute_change", "previous_value")})

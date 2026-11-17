@@ -146,7 +146,7 @@ def build_ui():
         ready = result.get("status") in {"ok", "empty"}
         plan = current.get("plan", {})
         can_drill = ready and current.get("type") == "query" and plan.get("intent") in {"aggregate", "rank", "compare", "contribution", "details", "diagnose"}
-        workflow = session.workflow_evidence if session else {}
+        workflow = session.selected_workflow() if session else {}
         return (gr.Row(visible=can_drill), gr.Row(visible=workflow.get("type") == "workflow"),
                 gr.Row(visible=ready and (result.get("truncated", False) or result.get("row_offset", 0) > 0 or len(result.get("rows", [])) >= 100)),
                 gr.Button(visible=ready), gr.Accordion(visible=bool(numeric_columns(evidence))))
@@ -185,15 +185,21 @@ def build_ui():
 
     def select_step(session, index):
         from app.models import QueryResult
-        root = session.workflow_evidence
+        root = session.selected_workflow()
         if root.get("type") != "workflow":
             raise ValueError("当前不是多步骤分析")
+        if not 1 <= int(index) <= len(root["steps"]):
+            raise ValueError("步骤编号超出当前任务范围")
         selected = root["steps"][int(index)-1]
-        session.focus_step = int(index)
+        if session.view_focus.get("kind") == "inspection":
+            session.view_focus["step"] = int(index)
+        else:
+            session.focus_step = int(index)
         if selected.get("type") == "query" and selected["result"]["status"] in {"ok", "empty"}:
             session.last_successful_plan = AnalysisPlan.model_validate(selected["plan"])
             session.last_result = QueryResult.model_validate(selected["result"])
             session.analysis_evidence = selected
+            session.view_focus["record_id"] = selected["record_id"]
         session.last_evidence = selected
         store.save(session, executors[session.dataset_id].manifest)
         return session, selected, *result_components(selected)
@@ -211,14 +217,14 @@ def build_ui():
         labels = {"known": "已确认", "unknown": "未知", "absent": "无此分组", "not_applicable": "无适用样本"}
         table = [["本期" if r["period"] == "current" else "基期", r["entity_id"], label(r["metric"]), r["before"]["value"], labels[r["before"]["state"]],
                   r["after"]["value"], labels[r["after"]["state"]], r["delta"],
-                  (f"共同变化 {r['membership']['common_change']}；进入 {r['membership']['entered_value']}；退出 {r['membership']['exited_value']}；未确认 {r['membership']['unknown_count']}" if r["membership"] else "按指标定义重算"),
+                  (f"共同变化 {r['membership']['common_change']}；进入 {r['membership']['entered_value']}；退出 {r['membership']['exited_value']}；资格恢复 {r['membership'].get('eligibility_entered_value', 0)}；资格退出 {r['membership'].get('eligibility_exited_value', 0)}；归属未确认差额 {r['membership'].get('scope_uncertain_change', 0)}；未确认 {r['membership']['unknown_count']}" if r["membership"] else "按指标定义重算"),
                   "通过" if r["reconciled"] is True else "暂不能确认" if r["reconciled"] is None else "不一致",
                   "是" if r["displayed_before"] else "否", "是" if r["displayed_after"] else "否"]
                  for r in report.get("metric_comparisons", [])[:500]]
         changes = [[r["layer"], r["key"], r["change"], r["before"], r["after"], r["explanation"]] for r in report.get("preview", [])]
         stringify = lambda rows: [["—" if v is None else json.dumps(v, ensure_ascii=False, default=str) if isinstance(v, (list, dict)) else str(v) for v in row] for row in rows]
         return (session.transcript, session, turn.text,
-            gr.Dataframe(value={"headers": ["期间", "分组", "指标", "原值", "原完整度", "新值", "新完整度", "差额", "范围成员分解", "勾稽", "原表可见", "新表可见"], "data": stringify(table)}, visible=bool(table)),
+            gr.Dataframe(value={"headers": ["期间", "分组", "指标", "原值", "原计算状态", "新值", "新计算状态", "差额", "范围成员分解", "勾稽", "原表可见", "新表可见"], "data": stringify(table)}, visible=bool(table)),
             gr.Dataframe(value={"headers": ["差异层次", "业务键", "变化", "原记录", "新记录", "解释"], "data": stringify(changes)}, visible=bool(changes)),
             gr.DownloadButton(value=state.get("bundle_file"), visible=state.get("status") == "completed"),
             gr.DownloadButton(value=state["report_file"], visible=True), state, archives(session.dataset_id, session.session_id))
@@ -230,10 +236,26 @@ def build_ui():
         store.save(session, executors[session.dataset_id].manifest)
         return session.transcript, session, turn.evidence, *result_components(turn.evidence), archives(session.dataset_id, session.session_id)
 
-    def inspect_quality(session):
-        turn = agent.quality_details(session)
+    def inspect_quality(session, evidence):
+        turn = agent.quality_details(session, specified=True)
         view = present(turn.evidence)
-        return gr.Dataframe(value={"headers": view.headers, "data": view.table}, visible=True), gr.DownloadButton(value=view.csv_file, visible=True)
+        return gr.Dataframe(value={"headers": view.headers, "data": view.table}, visible=True), gr.DownloadButton(value=view.csv_file, visible=True), turn.text, gr.Button(visible=True), gr.Accordion(visible=True), evidence.get("record_id")
+
+    def reset_quality(evidence, parent_id):
+        # A queued refresh of the same evidence must not hide a newly opened inspection.
+        if parent_id and parent_id == evidence.get("record_id"):
+            return (gr.skip(),) * 7
+        return (gr.Dataframe(visible=False), gr.DownloadButton(value=None, visible=False), "", None,
+                gr.DownloadButton(value=None, visible=False), gr.Button(visible=False), gr.Accordion(visible=False, open=False))
+
+    def inspect_source(session, evt: gr.SelectData):
+        import json
+        from app.config import RUNS_DIR
+        if session.view_focus.get("kind") != "quality":
+            raise ValueError("请先打开质量依据")
+        record = json.loads((RUNS_DIR / session.dataset_id / (session.view_focus["record_id"] + ".json")).read_text(encoding="utf-8"))
+        position = record["result"]["columns"].index("order_id")
+        return agent.quality_sources(session, str(evt.row_value[position]))
 
     def chart_drill(session, target, evt: gr.SelectData):
         current = display_evidence(session.last_evidence)
@@ -330,6 +352,7 @@ def build_ui():
             with gr.Row(visible=False) as drill_controls:
                 drill_target = gr.Dropdown(choices=[(label, key) for key, label in TARGETS.items()], value="auto", label="点击结果查看明细", info="选择要进一步查看的内容，再点击表格中的记录。")
                 drill_back = gr.Button("返回上层分析")
+            active_scope = gr.Markdown()
             result_table = gr.Dataframe(label="本轮查询结果", interactive=False, visible=False, datatype="str")
             bar = gr.BarPlot(x="分组", y="数值", visible=False, height=300)
             line = gr.LinePlot(x="分组", y="数值", visible=False, height=300)
@@ -352,8 +375,13 @@ def build_ui():
                 download_all = gr.DownloadButton("下载完整结果", visible=False)
                 inspect_quality_button = gr.Button("查看质量依据")
             export_status = gr.Markdown()
-            quality_table = gr.Dataframe(label="当前分析范围质量记录（最多500条，来源行号从表头下一行起）", interactive=False, visible=False)
-            quality_download = gr.DownloadButton("下载质量记录", visible=False)
+            quality_summary = gr.Markdown()
+            quality_table = gr.Dataframe(label="分析期间的三类问题（预览最多500条，点击记录定位来源）", interactive=False, visible=False)
+            quality_download = gr.DownloadButton("下载当前页质量记录", visible=False)
+            quality_export = gr.Button("导出全部质量记录", visible=False)
+            quality_full = gr.DownloadButton("下载全部质量记录", visible=False)
+            with gr.Accordion("问题原始记录", open=False, visible=False) as quality_source_panel:
+                quality_source = gr.JSON()
             evidence = gr.JSON(visible=False)
             with gr.Accordion("高级分析 · SQL", open=False):
                 gr.Markdown("使用 SQL 进一步分析数据。查询上次分析结果时，数据表名为 `analysis_result`。")
@@ -408,7 +436,7 @@ def build_ui():
                 history_table = gr.Dataframe(interactive=False, label="点击记录后可在上方恢复对应会话")
                 history_text = gr.Markdown()
         with gr.Accordion("接入新的Excel/CSV数据", open=initial_dataset is None):
-            gr.Markdown("上传包含订单、客户、商品明细、支付、评价、商品、商家、品类和地理信息的 Excel 或 CSV 文件。先识别文件，再核对字段并导入。")
+            gr.Markdown("上传包含订单、客户、商品明细、支付、评价、商品、商家、品类和地理信息的 Excel 或 CSV 文件。先识别文件，再核对字段并导入。新导入按正式复赛金额规则计算：同一明细键出现不同非空商品价时，整单商品额和运费暂不计入，订单仍保留；原始记录完整留存。")
             upload_files = gr.File(file_count="multiple", file_types=[".csv", ".xlsx"], type="filepath", label="数据文件")
             inspect_files = gr.Button("识别文件")
             upload_structure = gr.JSON(visible=False)
@@ -439,7 +467,10 @@ def build_ui():
         generate.click(draft_sql, [sql_question, session, dataset, sql_scope], [sql_editor, sql_note, session, saved, sql_parameters], concurrency_id="analysis")
         execute_sql.click(run_sql, [sql_editor, sql_parameters, session, dataset, sql_scope], shared_outputs, concurrency_id="analysis")
         evidence.change(refresh_visuals, evidence, [chart_metrics, interactive_charts, download_all, export_status, sql_validation], concurrency_id="analysis")
-        evidence.change(lambda: (gr.Dataframe(visible=False), gr.DownloadButton(value=None, visible=False)), outputs=[quality_table, quality_download], concurrency_id="analysis")
+        from app.business_answers import scope_view
+        evidence.change(scope_view, [evidence, session], active_scope, concurrency_id="analysis")
+        quality_parent = gr.State(None)
+        evidence.change(reset_quality, [evidence, quality_parent], [quality_table, quality_download, quality_summary, quality_source, quality_full, quality_export, quality_source_panel], concurrency_id="analysis")
         evidence.change(result_controls, [evidence, session], [drill_controls, workflow_controls, pagination_controls, export_all, chart_controls], concurrency_id="analysis")
         sql_catalog.change(catalog_table, sql_catalog, sql_fields, concurrency_id="analysis")
         sql_validation.change(validation_text, sql_validation, sql_validation_message, concurrency_id="analysis")
@@ -451,9 +482,11 @@ def build_ui():
         next_page.click(page_next, [session, page_size], shared_outputs, concurrency_id="analysis")
         refresh_page.click(page_refresh, [session, page_size], shared_outputs, concurrency_id="analysis")
         export_all.click(full_export, session, [download_all, export_status], concurrency_id="analysis")
-        inspect_quality_button.click(inspect_quality, session, [quality_table, quality_download], concurrency_id="analysis")
+        inspect_quality_button.click(inspect_quality, [session, evidence], [quality_table, quality_download, quality_summary, quality_export, quality_source_panel, quality_parent], concurrency_id="analysis")
+        quality_table.select(inspect_source, session, quality_source, concurrency_id="analysis")
+        quality_export.click(lambda s: gr.DownloadButton(value=agent.quality_export(s)["csv_file"], visible=True), session, quality_full, concurrency_id="analysis")
         show_step.click(select_step, [session, step_number], [session, evidence, *result_outputs], concurrency_id="analysis")
-        resume_tasks.click(lambda session: (agent.respond(session, "/continue"), session)[1], session, session, concurrency_id="analysis").then(
+        resume_tasks.click(lambda session: (agent.resume_inspection(session), session)[1], session, session, concurrency_id="analysis").then(
             lambda s: (s.transcript, s, s.last_evidence, *result_components(s.last_evidence), archives(s.dataset_id, s.session_id)), session, shared_outputs, concurrency_id="analysis")
         remove_filter.click(remove_condition, [session, condition_field], shared_outputs, concurrency_id="analysis")
         replay_button.click(replay_current, [session, replay_target], [*shared_outputs, dataset], concurrency_id="analysis")

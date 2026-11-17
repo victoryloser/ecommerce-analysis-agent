@@ -1,6 +1,7 @@
 """每个查询一个子进程，超时后终止并回收。"""
 import multiprocessing as mp
 import csv
+from decimal import DecimalException
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ from app.config import MAX_ROWS, QUERY_TIMEOUT
 from app.models import QueryResult
 from app.sql_compiler import CompiledQuery
 from app.quality import decode_quality
+from app.result_math import resolve_ratios
 
 
 def _query(path: str, compiled: CompiledQuery, pipe, offset=0, limit=MAX_ROWS, export_path=None) -> None:
@@ -26,7 +28,14 @@ def _query(path: str, compiled: CompiledQuery, pipe, offset=0, limit=MAX_ROWS, e
                     writer = csv.writer(handle)
                     writer.writerow(columns)
                     while rows := cursor.fetchmany(1000):
-                        writer.writerows(rows)
+                        columns_visible, visible, quality = decode_quality(columns, rows)
+                        resolve_ratios(columns_visible, visible, compiled.ratios)
+                        # Preserve the exported quality column and its original position.
+                        if "__quality" in columns:
+                            pos = columns.index("__quality")
+                            for row, raw in zip(visible, rows):
+                                row.insert(pos, raw[pos])
+                        writer.writerows(visible)
                         count += len(rows)
                 pipe.send({"columns": columns, "rows": [], "truncated": False, "export_file": export_path, "row_count": count})
             else:
@@ -36,8 +45,9 @@ def _query(path: str, compiled: CompiledQuery, pipe, offset=0, limit=MAX_ROWS, e
                     cursor = conn.execute(compiled.sql, compiled.parameters)
                 rows = cursor.fetchmany(limit + 1)
                 columns, visible, quality = decode_quality([col[0] for col in cursor.description], rows[:limit])
-                pipe.send({"columns": columns, "rows": visible, "quality": quality, "truncated": len(rows) > limit, "row_offset": offset})
-    except duckdb.Error as error:
+                ratios = resolve_ratios(columns, visible, compiled.ratios)
+                pipe.send({"columns": columns, "rows": visible, "quality": quality, "ratios": ratios, "truncated": len(rows) > limit, "row_offset": offset})
+    except (duckdb.Error, ValueError, DecimalException) as error:
         # 数据库错误跨进程传回；不改 SQL、不换库、不返回伪造的 0。
         pipe.send({"error": str(error)})
     finally:

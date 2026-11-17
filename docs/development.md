@@ -4,12 +4,13 @@
 
 用户消息 → 会话与澄清 → AnalysisPlan → 语义校验 → SQL 编译与审计 → 只读执行 → 结果、图表和证据。
 
-模型选择指标、条件与步骤，数据库计算金额、比例及排名。缺失年份、实体歧义及工作流条件进入统一澄清；明确的槽位回复直接补入计划后重新校验。
+模型选择指标、条件与步骤，数据库计算金额、差额及排名；结果层用精确分子分母计算比率。缺失年份、实体歧义及工作流条件进入统一澄清；明确的槽位回复直接补入计划后重新校验。
 
 | 模块 | 职责 |
 |---|---|
 | source / import_data / data_upload | 来源、快照、上传映射和质量检查 |
 | models / semantic / metadata | 计划、指标口径、关系和粒度 |
+| calculation / result_math | 快照绑定金额规则、精确比率和恢复 |
 | providers / planner / clarification | 模型协议、规划和澄清 |
 | sql_compiler / advanced / predicates | 聚合、比较、贡献、诊断和条件 |
 | sql_guard / sql_audit / executor / query_worker | 审核、授权和执行 |
@@ -46,6 +47,18 @@ SQL 可访问原始表或上次完整分析结果。后者重新编译成功计�
 `scripts/build_release.py` 仅打包代码和文档，不包含 `material/` 或数据文件；`scripts/verify_release.py` 在干净环境运行测试，并记录缺少本地样例导致的跳过项。
 
 ## 自动测试
+
+R1的固定规划回归为 `python -m pytest tests/test_r1_workflows.py tests/test_r1_round2.py -q`。前者使用临时合成数据检查批量条件变更、依赖重绑、查看与恢复、质量期间并集、来源记录、整单核查和失败续算；后者在本地正式包存在时运行D1—D4的A/B连续链，缺材料则跳过。固定规划通过不等于真实模型理解验收。
+
+安装下文的可选Playwright后，可运行 `python scripts/check_r1_ui.py`。脚本使用临时合成CSV、固定规划输出和本机Edge，实际点击质量查验、来源记录、完整导出、商家核查及结果步骤切换；不读取模型配置、不调用模型服务。截图保存在忽略目录 `.build/r1-ui.png`。
+
+聊天和UI范围表单共用 `apply_updates`，旧单对象更新保持兼容。`output_mode` 将商家订单核查、同范围订单与复购统计、指定质量查验展开为受控工作流；金额仍由R0编译器计算。`analysis_anchor` 引用父分析证据，`view_focus` 记录查看对象，查看不覆盖工作意图或清空任务。质量查验的两期并集只用于该功能，不改变普通分析的单期间契约。
+
+`tests/test_round2_amounts.py` 使用临时构造数据，覆盖整单排除、运费、字段缺失、成员未知、门槛排名、精确百分比、历史规则、恢复/导出/SQL工作台和P1资格差额。运行 `python -m pytest tests/test_round2_amounts.py -q`。
+
+`tests/test_round2_reference.py` 在本地存在 `semi-material-2/公开复赛包_v1.1` 时，核对四套数据的金额、品类贡献、排名、复购及版本差额；缺材料则跳过。参考答案只由测试读取，不进入应用运行时。这是确定性验收，不等于真实模型连续对话验收。
+
+`CalculationContext` 由 manifest 解析，编译、审计、CSV导出和 `analysis_result` 共用；P1子进程分别读取两侧快照规则。`import_upload` 默认正式规则，内部 `import_tables(..., quality_rule_version=...)` 可显式创建旧规则或正式规则快照，历史练习导入默认旧规则；不得修改已发布 manifest 来迁移。
 
 联合维度入口使用 `AnalysisPlan.group_by`，旧 `dimension` 保持兼容。`grouping.py` 统一复合身份和字段投影；`facts.py` 按“订单 × 组合”形成事实。`rank_within` 控制排名分区，`contribution_within` 可指定品类内贡献，`contribution_direction` 选择增长或下降排序。工作流通过 `bind_mode="group"` 引用整组；来源有多个父分区时须指定 `source_partition`。
 

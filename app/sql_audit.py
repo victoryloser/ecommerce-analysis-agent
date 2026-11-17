@@ -3,6 +3,7 @@ import sqlglot
 from sqlglot import exp
 
 from app.models import AnalysisPlan
+from app.calculation import LEGACY_CONTEXT
 from app.sql_compiler import CompiledQuery
 
 
@@ -20,10 +21,11 @@ def columns_in_group(select) -> list[str]:
     return [c.sql(dialect="duckdb") for c in group.expressions] if group else []
 
 
-def audit_query(plan: AnalysisPlan, compiled: CompiledQuery):
+def audit_query(plan: AnalysisPlan, compiled: CompiledQuery, context=LEGACY_CONTEXT):
     if plan.intent != "join_example":
         from app.sql_compiler import compile_query
-        expected = compile_query(plan)
+        expected = compile_query(plan, context)
+        require(compiled.ratios == expected.ratios, "精确比例成分")
         require(compiled.parameters == expected.parameters, "期间、状态与筛选参数")
         require(expression(compiled.sql) == expression(expected.sql), "事实粒度、完整度与已登记计划结构")
         return

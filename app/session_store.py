@@ -50,7 +50,8 @@ class SessionStore:
                  "last_evidence": session.last_evidence, "analysis_evidence": session.analysis_evidence,
                  "drill_stack": session.drill_stack, "sql_state": session.sql_state, "workflow_evidence": session.workflow_evidence,
                  "focus_step": session.focus_step, "workflow_tasks": session.workflow_tasks,
-                 "comparison_state": session.comparison_state}
+                 "comparison_state": session.comparison_state,
+                 "analysis_anchor": session.analysis_anchor, "view_focus": session.view_focus}
         for name in ("last_successful_plan", "pending_plan", "last_result", "working_plan"):
             value = getattr(session, name)
             state[name] = value.model_dump(mode="json") if value else None

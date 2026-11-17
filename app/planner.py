@@ -5,7 +5,7 @@ from datetime import datetime
 from pydantic import ValidationError
 
 from app.models import AnalysisPlan
-from app.plan_update import apply_update, expand_periods
+from app.plan_update import apply_updates, expand_periods
 from app.clarification import bind_entities, resolve_slots
 from app.providers import Provider
 from app.semantic import PlanError, catalog, get_catalog, validate_plan
@@ -22,11 +22,15 @@ INSTRUCTIONS = """你是经营分析计划器。根据真实用户问题输出�
 pending_intent支持aggregate/rank/compare/contribution/details/diagnose/join_example；details、diagnose和join_example不要求metric_ids。贡献和比较均须保留基期月份或已经明确的comparison_range，1月对12月由宿主跨年补全。
 同名实体无法唯一确定时用clarify并列出entity_candidates，每项包含field、value(真实ID)、label；过滤值也可使用字典中的完整名称，由宿主绑定到ID。
 启用示例上下文时Q03~Q05的未写年份月份为2025年；仍按用户写出的订单门槛，禁止凭记忆套用另一数据集。
-修改/删除条件时输出intent=update和update对象，operation=set/remove/reset，field为目标字段，values为替换值，金额条件可提供predicate；不要重写整个计划。宿主基于working_plan（失败后仍保留最新意图）更新。工作流用target_step或当前focus_step。OR/NOT组无法明确修改时只澄清该组。继续任务用intent=continue。
+修改/删除条件时输出intent=update和updates列表，一轮最多16项，operation=set/remove/reset，field为目标字段，values为替换值，金额条件可提供predicate；旧update单对象也可用，但不能与updates同时填。宿主将整批修改后统一执行；可以更改intent、top_n、min_group_count、detail_level、limit_mode。工作流单步修改用target_step或当前focus_step。OR/NOT组无法明确修改时只澄清该组。继续任务用intent=continue。
+scope_source默认working（失败后保留最新意图）；沿用父分析/刚才比较范围用analysis；明确分析当前查看对象用view。analysis_scope是父分析，view_focus是当前查看对象；查看或翻页不等于修改分析范围。
+output_mode默认analysis；需要商家排名并任选冠军有效订单核查时用seller_audit，top_n按请求填写（前三名为3），宿主展开排名、选单、整单核查和全部明细。全期订单数加自然客户复购用customer_summary，宿主在同一范围执行两次独立汇总。指定完全重复明细、同键价格冲突、整单支付缺失用quality_check，quality_scope默认comparison_union继承当前和比较期；只查一期用current/previous，quality_types可选三类。使用这些模式不填写steps，继承范围可用intent=update、scope_source=analysis、updates=[]；模式展开由宿主完成，不能猜商家或订单ID。
+连续更正到一个月汇总时，updates中设置time_range、intent=aggregate、dimension=total、metric_ids=[order_count,sales,freight]，并设置品类条件；设置intent=aggregate会取消两期比较。撤掉品类并做商家核查时移除category_id、设置top_n并用seller_audit。全期间撤回旧条件时reset清除实体/订单筛选，并将time_range设为period_mode=full_coverage，再用customer_summary；保留已送达状态。全品类贡献用intent=contribution、dimension=category、metric_ids=[sales]、limit_mode=all；不要依靠默认Top10表示全部。
+可算问题附带促销因果或利润问题时，在同一个计划填limitations=[causality]或[profit]，先计算可算部分再说明缺失；不必单独调用解释步骤。binding_updates仅宿主用于依赖覆盖，不由模型填写。audit_seller_id仅核查绑定使用，不可猜测。
 全期填写period_mode=full_coverage；明确日期用explicit_range。环比填写comparison_mode=previous_month；固定基期用fixed，删除比较用none。time_range更新通过update.period和period_mode传入；comparison_range通过update.period和comparison_mode传入。
 用户明确提出新问题时放弃旧澄清，不继承无关的过滤条件。
 compare需要显式当前和基期范围，支持多个指标及品类/商家/省份/履约状态分组。rank按首个指标降序且保留并列。
-联合分析用group_by=[category,seller]或[month,category]且dimension=total；同一明细组成组合，不把订单的品类集合与商家集合交叉。支持sales/order_count/delay_rate/avg_review/low_score_rate；评价与履约属于含该组合的整单样本，不是商品独有评分。含month只做aggregate/rank，不做两期compare/contribution。
+联合分析用group_by=[category,seller]或[month,category]且dimension=total；同一明细组成组合，不把订单的品类集合与商家集合交叉。支持sales/freight/order_count/delay_rate/avg_review/low_score_rate；评价与履约属于含该组合的整单样本，不是商品独有评分。含month只做aggregate/rank，不做两期compare/contribution。
 全局组合排名rank_within=null；每品类内商家排名rank_within=category，每月内品类排名rank_within=month。贡献可用contribution_within=category另列品类内分母，同时保留全范围贡献；看下降驱动用contribution_direction=decrease。Top N保留并列，分母不受Top N影响。
 增加/去掉分组用update.field=group_by、values为完整的新分组列表；取消品类或商家筛选用category_id/seller_id，不能混淆。联合分组不支持支付分摊及复购，遇混合问题拆为可支持的独立步骤。
 增长贡献用contribution、一个可加金额指标、品类/商家/省份/履约状态分组，输出变化额及占净增长比例；无支付分摊规则。
@@ -40,7 +44,7 @@ compare需要显式当前和基期范围，支持多个指标及品类/商家/�
 找以前/上周/其他会话的结果用history，history_query为归一化指标或主题关键词，可用history_start/end限制更新时间；不要把历史检索误作重新查询原始数据。
 ‘谁最高/哪个最多/冠军/第一名’都表示rank且top_n=1，不能套用默认10；只有用户明确要求前N名时使用N。
 ‘有评价的延迟和准时订单平均分’用avg_review及delivery_status分组，全期；复购用repeat_customers，不能用customer_id。
-‘销售额’指sales不含运费；‘销售收入’等含糊口径应澄清是商品销售额还是支付金额。
+‘商品额/销售额’指sales不含运费；运费指标是freight。商品额和运费遵循目录绑定的快照金额规则，模型不得选择或覆盖规则；‘销售收入’等含糊口径应澄清是商品销售额还是支付金额。
 解释商品明细和支付重复用explain/joins；指标口径用explain/metrics；促销归因用explain/causality。
 若用户明确要求用真实订单/实际数字演示明细与支付的关联放大，使用join_example，metric_ids=[]、dimension=total、明确time_range（未指定期间用全期），不附加实体过滤。仅问原理仍用explain而不查库。
 缺信息输出clarify与clarification；不支持的分析输出unsupported与理由。纯解释不要求时间。
@@ -55,6 +59,8 @@ def make_plan(provider: Provider, manifest: dict, session: Session, question: st
     if completed is not None:
         completed = bind_entities(completed, manifest, question)
         completed = expand_periods(completed, manifest)
+        from app.task_shapes import expand_output
+        completed = expand_output(completed)
         validate_plan(completed, manifest)
         trace.record("slots_resolved", plan=completed.model_dump(mode="json"))
         return completed, 0
@@ -107,15 +113,26 @@ def make_plan(provider: Provider, manifest: dict, session: Session, question: st
                 raise PlanError("当前没有可继续的分析")
             plan = session.working_plan.model_copy(deep=True)
         elif plan.intent == "update":
-            base = session.working_plan or session.last_successful_plan
-            if base is None or plan.update is None:
+            base = session.view_plan(manifest) if plan.scope_source == "view" else session.analysis_plan() if plan.scope_source == "analysis" else session.working_plan or session.last_successful_plan
+            changes = [plan.update] if plan.update else plan.updates
+            if base is None or (not changes and plan.output_mode == "analysis"):
                 raise PlanError("请先指定分析，再修改条件")
-            change = plan.update
-            if base.intent == "workflow" and change.target_step is None:
-                change = change.model_copy(update={"target_step": session.focus_step})
-            plan = apply_update(base, change, manifest, session.workflow_tasks)
+            mode, limitations, scope_source = plan.output_mode, plan.limitations, plan.scope_source
+            if mode != "analysis" and base.intent == "workflow":
+                base = base.model_copy(update={"intent": "aggregate", "steps": [], "output_mode": "analysis"})
+            plan = apply_updates(base, changes, manifest, session.workflow_tasks, session.focus_step)
+            plan = plan.model_copy(update={"output_mode": plan.output_mode if mode == "analysis" and plan.intent == "workflow" else mode, "limitations": limitations})
+            trace.record("conditions_updated", scope_source=scope_source,
+                         source_record_id=(session.analysis_anchor if scope_source == "analysis" else
+                                           session.view_focus.get("record_id") if scope_source == "view" else
+                                           session.analysis_evidence.get("record_id")),
+                         view_focus=dict(session.view_focus) if scope_source == "view" else None,
+                         updates=[u.model_dump(mode="json") for u in changes],
+                         before=base.model_dump(mode="json", exclude_defaults=True), after=plan.model_dump(mode="json", exclude_defaults=True))
         plan = expand_periods(plan, manifest)
         plan = bind_entities(plan, manifest, question)
+        from app.task_shapes import expand_output
+        plan = expand_output(plan)
         validate_plan(plan, manifest)
         trace.record("plan_validated", plan=plan.model_dump(mode="json"))
         return plan, trace.model_calls

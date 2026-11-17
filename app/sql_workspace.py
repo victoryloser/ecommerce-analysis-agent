@@ -48,15 +48,16 @@ def compile_exploration(session, executor, sql: str, parameters: list, scope: Sc
     if not isinstance(parameters, list) or any(isinstance(value, (dict, list)) for value in parameters):
         raise ValueError("绑定参数必须是标量值组成的JSON数组")
     catalog = workspace_catalog(session, scope)
+    catalog["quality_rule_version"] = executor.context.rule_version
     if scope == "raw":
         validate_sql(sql, exploration=True)
         return CompiledQuery(sqlglot.parse_one(sql, read="duckdb").sql(dialect="duckdb"), tuple(parameters)), catalog
     plan = session.last_successful_plan
     validate_plan(plan, executor.manifest)
-    base = compile_query(plan)
+    base = compile_query(plan, executor.context)
     from app.advanced import extended
     validate_sql(base.sql, schema=QUERY_SCHEMA, exploration=extended(plan))
-    audit_query(plan, base)
+    audit_query(plan, base, executor.context)
     # 用完整查询作CTE，不能把500行预览误作全量输入。
     base_tree = sqlglot.parse_one(base.sql, read="duckdb")
     qualified = qualify(base_tree.copy(), dialect="duckdb", schema=QUERY_SCHEMA, quote_identifiers=False, identify=False)
@@ -68,7 +69,14 @@ def compile_exploration(session, executor, sql: str, parameters: list, scope: Sc
     original_with = tree.args.get("with_")
     cte = exp.CTE(this=base_tree, alias=exp.TableAlias(this=exp.to_identifier("analysis_result")))
     tree.set("with_", exp.With(expressions=[cte, *(original_with.expressions if original_with else [])]))
-    return CompiledQuery(tree.sql(dialect="duckdb"), base.parameters + tuple(parameters)), catalog
+    # Only transparent projections retain certified ratio components. Arbitrary
+    # expressions remain custom SQL and are never silently rewritten.
+    source = tree.args.get("from_")
+    transparent = (isinstance(tree, exp.Select) and not original_with and not tree.args.get("joins")
+                   and source is not None and isinstance(source.this, exp.Table) and source.this.name == "analysis_result"
+                   and all(isinstance(e, exp.Column) or (isinstance(e, exp.Star) and not e.args) for e in tree.expressions))
+    ratios = base.ratios if transparent else {}
+    return CompiledQuery(tree.sql(dialect="duckdb"), base.parameters + tuple(parameters), ratios), catalog
 
 
 class SQLWorkspace:
@@ -135,9 +143,9 @@ class SQLWorkspace:
             raise ValueError("需先选择一份已审核分析作为结果核对基准")
         plan = session.last_successful_plan
         validate_plan(plan, executor.manifest)
-        expected = compile_query(plan)
+        expected = compile_query(plan, executor.context)
         validate_sql(expected.sql, schema=QUERY_SCHEMA, exploration=extended(plan))
-        audit_query(plan, expected)
+        audit_query(plan, expected, executor.context)
         actual, _ = compile_exploration(session, executor, sql, parameters, scope)
         expected_tree = qualify(sqlglot.parse_one(expected.sql, read="duckdb"), dialect="duckdb", schema=QUERY_SCHEMA, quote_identifiers=False, identify=False)
         actual_tree = qualify(sqlglot.parse_one(actual.sql, read="duckdb"), dialect="duckdb", schema=QUERY_SCHEMA, quote_identifiers=False, identify=False)
@@ -167,7 +175,7 @@ class SQLWorkspace:
                   "result": result.model_dump(), "turn_id": trace.turn_id, "event_file": str(trace.event_file.relative_to(RUNS_DIR)),
                   "calls_used": trace.steps, "model": "user-sql", "planning_calls": 0,
                   **{key: manifest[key] for key in ("metadata_version", "metadata_sha256", "schema_sha256", "database_sha256")},
-                  "source_hashes": manifest["sources"]}
+                  "source_hashes": manifest["sources"], "quality_rule_version": manifest.get("quality_rule_version")}
         content = json.dumps({"columns": result.columns, "rows": result.rows}, ensure_ascii=False, default=str, sort_keys=True)
         record["result_sha256"] = hashlib.sha256(content.encode()).hexdigest()
         directory = RUNS_DIR / session.dataset_id

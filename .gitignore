@@ -16,6 +16,7 @@ build/
 # 本地业务数据和示例数据不进入仓库。
 material/
 semi-material/
+semi-material-2/
 AGENTS.md
 docs/P*深化设计.md
 docs/*方案*.md

@@ -8,8 +8,10 @@ from app.models import AnalysisIntent, AnalysisPlan
 from app.metadata import METRIC_DETAILS, metric_detail, required_tables, table_detail
 from app.source import SCHEMA
 from app.grouping import dimensions, JOINT_GROUPS
+from app.calculation import CalculationContext, LEGACY_CONTEXT
 
 METRICS = {
+    "freight": "有效商品明细 freight_value 合计，元；保留明细归属及绑定快照的金额规则",
     "sales": "已送达订单商品明细 price 合计，元，不含运费；按品类/商家保留明细归属",
     "order_count": "已送达订单数；分组内 order_id 去重",
     "delay_rate": "延迟的已送达订单数/已送达订单数，0~1；任一送达/预计时间缺失则该组比例不可计算",
@@ -26,9 +28,9 @@ RELATIONSHIPS = [
 ]
 
 
-def metadata_hash() -> str:
+def metadata_hash(context=LEGACY_CONTEXT) -> str:
     content = {"version": METADATA_VERSION, "schema": {t: table_detail(t) for t in SCHEMA},
-               "metrics": {m: metric_detail(m) for m in METRICS}, "relationships": RELATIONSHIPS}
+               "metrics": {m: metric_detail(m, context) for m in METRICS}, "relationships": RELATIONSHIPS}
     return hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
@@ -41,9 +43,11 @@ def load_manifest(dataset_id: str, data_dir: Path = DATA_DIR) -> dict:
 
 
 def catalog(manifest: dict) -> dict:
+    context = CalculationContext.from_manifest(manifest)
     return {
-        "dataset_id": manifest["dataset_id"], "metadata_version": METADATA_VERSION,
-        "coverage": manifest["coverage"], "metrics": {m: {"summary": description, **metric_detail(m)} for m, description in METRICS.items()},
+        "quality_rule_version": context.rule_version, "effective_metadata_sha256": metadata_hash(context),
+        "dataset_id": manifest["dataset_id"], "metadata_version": manifest["metadata_version"],
+        "coverage": manifest["coverage"], "metrics": {m: {"summary": description, **metric_detail(m, context)} for m, description in METRICS.items()},
         "coverage_fields": manifest.get("coverage_fields", {"purchase_at": manifest["coverage"]}),
         "dimensions": ["total", "month", "category", "seller", "delivery_status", "customer_state"],
         "joint_groups": JOINT_GROUPS,
@@ -54,19 +58,20 @@ def catalog(manifest: dict) -> dict:
             "repeat_customers": "仅此指标，total/month/customer_state 维度",
             "payment_amount": "禁止 category/seller 维度和 category_id/seller_id 过滤；无支付额分摊规则",
             "compare": "支持多个指标及total/category/seller/customer_state/delivery_status分组，显式comparison_range",
-            "contribution": "单一可加金额sales/payment_amount，非total/month维度，按变化额排名并计算对净增长的贡献率；不分摊支付",
+            "contribution": "单一可加金额sales/freight/payment_amount，非total/month维度，按变化额排名并计算对净增长的贡献率；不分摊支付",
             "details": "orders/items/payments/reviews明细；可按selected_order_id选择订单",
             "diagnose": "reconciliation支付与商品加运费对账、quality质量、sales_spike月销售突变、seller_outlier商家延迟率偏离",
             "workflow": "最多6个步骤；可独立执行、澄清、标明不支持；逐步保存及续算，不嵌套",
             "history": "检索已保存会话，history_query为内容，history_start/end按会话更新时间左闭右开筛选",
             "predicates": "order_where用于订单粒度（order_sales/order_freight为完整订单金额），item_where用于明细粒度；分别支持all/any/negate与比较/IN/NOT IN/BETWEEN/空值",
             "rank": "非total维度，按第一个指标降序；按订单数门槛过滤，并保留边界并列",
-            "joint_analysis": "group_by支持category+seller和month+category；商品额、订单、延迟和整单评价；禁止支付分摊与联合复购。含month仅汇总/排名。rank_within指定组内排名，contribution_within指定品类内分母；contribution_direction=decrease查看下降驱动。",
+            "joint_analysis": "group_by支持category+seller和month+category；商品额、运费、订单、延迟和整单评价；禁止支付分摊与联合复购。含month仅汇总/排名。rank_within指定组内排名，contribution_within指定品类内分母；contribution_direction=decrease查看下降驱动。",
         },
     }
 
 
 def get_catalog(manifest: dict, plan: AnalysisPlan) -> dict:
+    context = CalculationContext.from_manifest(manifest)
     def fields(node):
         return ([node.field] if node.field else []) + [field for child in node.children for field in fields(child)] if node else []
     used = [f.field for f in plan.filters] + fields(plan.order_where) + fields(plan.item_where)
@@ -79,7 +84,8 @@ def get_catalog(manifest: dict, plan: AnalysisPlan) -> dict:
         tables.update(SCHEMA)
     result = {"dataset_id": manifest["dataset_id"], "metadata_version": manifest["metadata_version"],
             "metadata_sha256": manifest["metadata_sha256"],
-            "metrics": {m: metric_detail(m) for m in plan.metric_ids},
+            "quality_rule_version": context.rule_version, "effective_metadata_sha256": metadata_hash(context),
+            "metrics": {m: metric_detail(m, context) for m in plan.metric_ids},
             "tables": {t: table_detail(t) for t in sorted(tables)}, "relationships": RELATIONSHIPS}
     result["applied_scope"] = {"time_field": plan.time_field, "order_statuses": plan.order_statuses,
                                "group_by": list(dimensions(plan)), "grouping_version": "joint-v1",
@@ -107,10 +113,19 @@ def validate_workflow(plan: AnalysisPlan, manifest: dict) -> None:
 
 
 def validate_plan(plan: AnalysisPlan, manifest: dict, *, allow_binding=False) -> None:
+    CalculationContext.from_manifest(manifest)
     if plan.dataset_id != manifest["dataset_id"] or plan.metadata_version != manifest["metadata_version"]:
         raise PlanError("计划的数据集或元数据版本与当前会话不一致")
     if plan.source_step and not allow_binding:
         raise PlanError("步骤依赖只用于workflow，执行前必须由宿主绑定真实结果")
+    if plan.binding_updates:
+        if not (allow_binding and plan.source_step):
+            raise PlanError("绑定后的覆盖仅用于有来源依赖的工作流步骤")
+        from app.plan_update import apply_updates
+        candidate = apply_updates(plan.model_copy(update={"binding_updates": []}), plan.binding_updates, manifest)
+        return validate_plan(candidate, manifest, allow_binding=allow_binding)
+    if plan.audit_seller_id and plan.audit_seller_id not in {r[0] for r in manifest["entities"]["sellers"]}:
+        raise PlanError("核查商家不在当前数据目录中")
     dims = dimensions(plan)
     if plan.group_by and dims not in JOINT_GROUPS:
         raise PlanError("联合分组仅支持品类与商家、月份与品类")
@@ -175,8 +190,18 @@ def validate_plan(plan: AnalysisPlan, manifest: dict, *, allow_binding=False) ->
     if not set(plan.order_statuses) <= known_statuses:
         raise PlanError("订单状态不在当前数据目录中")
     if plan.intent in {"details", "diagnose"}:
-        if plan.comparison_range is not None:
+        quality_check = plan.intent == "diagnose" and plan.diagnosis in {"quality_summary", "quality_rows"}
+        if quality_check and plan.quality_scope == "previous" and plan.comparison_range is None:
+            raise PlanError("当前分析没有比较基期")
+        if plan.comparison_range is not None and not quality_check:
             raise PlanError("明细/诊断不使用comparison_range")
+        if plan.intent == "diagnose" and plan.diagnosis == "order_candidate" and not plan.source_step:
+            sellers = [f for f in plan.filters if f.field == "seller_id"]
+            if len(sellers) != 1 or len(sellers[0].values) != 1:
+                raise PlanError("选单需要唯一已确认的商家")
+        if plan.intent == "diagnose" and plan.diagnosis == "order_audit" and not plan.source_step:
+            if not plan.selected_order_id or not plan.audit_seller_id:
+                raise PlanError("整单核查需要订单与商家")
         if plan.intent == "diagnose" and plan.diagnosis == "seller_outlier" and plan.item_where is not None:
             raise PlanError("商家异常诊断暂不与明细条件混用，请使用商家/品类实体筛选")
         for filter_ in plan.filters:
@@ -193,7 +218,7 @@ def validate_plan(plan: AnalysisPlan, manifest: dict, *, allow_binding=False) ->
     if plan.intent in {"compare", "contribution"}:
         if plan.comparison_range is None or "month" in dims:
             raise PlanError("比较需要明确基期；逐月序列请按月汇总，分组比较选择品类/商家/省份/履约状态")
-        if plan.intent == "contribution" and (len(plan.metric_ids) != 1 or plan.metric_ids[0] not in {"sales", "payment_amount"} or not dims):
+        if plan.intent == "contribution" and (len(plan.metric_ids) != 1 or plan.metric_ids[0] not in {"sales", "freight", "payment_amount"} or not dims):
             raise PlanError("增长贡献需要一个可加金额指标及非total分组，不能把比例或重复归属订单数直接相加")
     elif plan.comparison_range is not None:
         raise PlanError("仅compare计划使用comparison_range")

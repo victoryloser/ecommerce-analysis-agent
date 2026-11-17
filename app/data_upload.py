@@ -86,6 +86,8 @@ def import_upload(files: list[str], mapping: dict, name: str, data_dir: Path = D
         shutil.copyfile(path, target)
         copied.append(target)
     (directory / "mapping.json").write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
+    from app.calculation import ROUND2_RULE
+    version.setdefault("quality_rule_version", ROUND2_RULE)
     return import_tables(dataset_id, tables, [*copied, directory / "mapping.json"], name or dataset_id, data_dir,
                          practice={"year_context": None, "min_seller_orders": 1, "questions": []},
                          **({"data_origin": "uploaded"} | version))

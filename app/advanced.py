@@ -2,6 +2,7 @@
 import sqlglot
 
 from app.models import AnalysisPlan
+from app.calculation import LEGACY_CONTEXT, eligible_sql
 from app.sql_compiler import CompiledQuery
 from app.grouping import dimensions, result_columns, KEY_COLUMNS
 
@@ -12,38 +13,48 @@ def extended(plan: AnalysisPlan) -> bool:
             or plan.selected_order_id is not None or (plan.intent == "compare" and (plan.dimension != "total" or len(plan.metric_ids) != 1)))
 
 
-def aggregate(plan: AnalysisPlan) -> CompiledQuery:
+def aggregate(plan: AnalysisPlan, context=LEGACY_CONTEXT) -> CompiledQuery:
     from app.facts import aggregate as compile_facts
-    return compile_facts(plan)
+    return compile_facts(plan, context)
 
 
-def comparison(plan: AnalysisPlan) -> CompiledQuery:
+def comparison(plan: AnalysisPlan, context=LEGACY_CONTEXT) -> CompiledQuery:
     metrics = list(plan.metric_ids)
     if plan.min_group_count > 1 and "order_count" not in metrics:
         metrics.append("order_count")
-    current = aggregate(plan.model_copy(update={"intent": "aggregate", "comparison_range": None, "min_group_count": 1, "metric_ids": metrics}))
-    previous = aggregate(plan.model_copy(update={"intent": "aggregate", "time_range": plan.comparison_range, "comparison_range": None, "min_group_count": 1, "metric_ids": metrics}))
+    current = aggregate(plan.model_copy(update={"intent": "aggregate", "comparison_range": None, "min_group_count": 1, "metric_ids": metrics}), context)
+    previous = aggregate(plan.model_copy(update={"intent": "aggregate", "time_range": plan.comparison_range, "comparison_range": None, "min_group_count": 1, "metric_ids": metrics}), context)
     grouping = bool(dimensions(plan))
     projections = ["COALESCE(c.entity_id,p.entity_id) AS entity_id", "COALESCE(c.entity_name,p.entity_name) AS entity_name"] if grouping else []
     projections += [f"COALESCE(c.{col},p.{col}) AS {col}" for col in result_columns(plan)]
-    additive = {"sales", "order_count", "payment_amount", "repeat_customers"}
+    additive = {"sales", "freight", "order_count", "payment_amount", "repeat_customers"}
     for metric in plan.metric_ids:
         c = f"CASE WHEN c.__quality IS NULL THEN 0 ELSE c.{metric} END" if grouping and metric in additive else f"c.{metric}"
         p = f"CASE WHEN p.__quality IS NULL THEN 0 ELSE p.{metric} END" if grouping and metric in additive else f"p.{metric}"
         projections += [f"{c} AS {metric}_current", f"{p} AS {metric}_previous",
                         f"{c}-{p} AS {metric}_change", f"CAST({c}-{p} AS DOUBLE)/NULLIF({p},0) AS {metric}_rate"]
     from app.facts import quality_json
-    quality_fields = [f"'{m}_{role}',COALESCE(json_extract({alias}.__quality,'$.{m}'),{quality_json('0' if m in additive else 'NULL', '0', '0', '0', '0')})" for m in plan.metric_ids for role, alias in [("current", "c"), ("previous", "p")]]
+    quality_fields = []
+    certain = " AND ".join(f"COALESCE(CAST(json_extract({side}.__quality,'$.order_count.known_value') AS BIGINT),0)>={plan.min_group_count}" for side in ("c", "p"))
+    for m in plan.metric_ids:
+        for role, alias in [("current", "c"), ("previous", "p")]:
+            basis = "policy_eligible" if context.excludes_orders and m in {"sales", "freight"} else "full_population"
+            default = quality_json('0' if m in additive else 'NULL', '0', '0', '0', '0', basis=basis)
+            q = f"COALESCE(json_extract({alias}.__quality,'$.{m}'),{default})"
+            if plan.min_group_count > 1:
+                q = f"json_merge_patch({q},json_object('group_eligibility',CASE WHEN {certain} THEN 'confirmed' ELSE 'uncertain' END))"
+            quality_fields.append(f"'{m}_{role}',{q}")
     projections.append(f"json_object({','.join(quality_fields)}) AS __quality")
     if plan.min_group_count > 1:
         projections += ["CASE WHEN c.__quality IS NULL THEN 0 ELSE c.order_count END AS current_orders", "CASE WHEN p.__quality IS NULL THEN 0 ELSE p.order_count END AS previous_orders"]
         possible = [f"(COALESCE(CAST(json_extract({side}.__quality,'$.order_count.known_value') AS BIGINT),0)+COALESCE(CAST(json_extract({side}.__quality,'$.order_count.membership_unknown_count') AS BIGINT),0)>={plan.min_group_count})" for side in ("c", "p")]
         projections.append("(" + " AND ".join(possible) + ") AS __eligible")
+        projections.append(f"({certain}) AS __certain")
     keys = [KEY_COLUMNS[d] for d in dimensions(plan)] if plan.group_by else ["entity_id"]
     join = "FULL OUTER JOIN previous p ON " + " AND ".join(f"c.{key} IS NOT DISTINCT FROM p.{key}" for key in keys) if grouping else "CROSS JOIN previous p"
     sql = f"WITH current AS ({current.sql}), previous AS ({previous.sql}), changes AS (SELECT {','.join(projections)} FROM current c {join}) "
     threshold = " WHERE __eligible" if plan.min_group_count > 1 else ""
-    excluded = " EXCLUDE (__eligible)" if plan.min_group_count > 1 else ""
+    excluded = " EXCLUDE (__eligible,__certain)" if plan.min_group_count > 1 else ""
     if plan.intent == "contribution":
         metric = plan.metric_ids[0]
         total = f"CASE WHEN COUNT(*) OVER ()=COUNT({metric}_change) OVER () THEN SUM({metric}_change) OVER () END"
@@ -52,17 +63,28 @@ def comparison(plan: AnalysisPlan) -> CompiledQuery:
         if partition:
             subtotal = f"CASE WHEN COUNT(*) OVER ({partition})=COUNT({metric}_change) OVER ({partition}) THEN SUM({metric}_change) OVER ({partition}) END"
             fields += [f"({subtotal}) AS parent_change", f"CAST({metric}_change AS DOUBLE)/NULLIF(({subtotal}),0) AS parent_contribution_rate"]
+        rank_condition = f"COUNT(*) OVER ({partition})=COUNT({metric}_change) OVER ({partition})"
+        if plan.min_group_count > 1:
+            rank_condition += f" AND COUNT(*) FILTER (WHERE NOT __certain) OVER ({partition})=0"
+        contribution_exclude = " EXCLUDE (__eligible)" if plan.min_group_count > 1 else ""
+        final_exclude = "__rank,__certain" if plan.min_group_count > 1 else "__rank"
         direction = "ASC" if plan.contribution_direction == "decrease" else "DESC"
-        sql += f", contributions AS (SELECT *,{','.join(fields)} FROM changes), eligible AS (SELECT *{excluded} FROM contributions{threshold}), ranked AS (SELECT *,CASE WHEN COUNT(*) OVER ({partition})=COUNT({metric}_change) OVER ({partition}) THEN RANK() OVER ({partition}ORDER BY {metric}_change {direction} NULLS LAST) END AS __rank FROM eligible) SELECT * EXCLUDE (__rank) FROM ranked WHERE __rank<={plan.top_n} OR __rank IS NULL ORDER BY {metric}_change {direction} NULLS LAST,entity_id"
+        selection = "TRUE" if plan.limit_mode == "all" else f"__rank<={plan.top_n} OR __rank IS NULL"
+        sql += f", contributions AS (SELECT *,{','.join(fields)} FROM changes), eligible AS (SELECT *{contribution_exclude} FROM contributions{threshold}), ranked AS (SELECT *,CASE WHEN {rank_condition} THEN RANK() OVER ({partition}ORDER BY {metric}_change {direction} NULLS LAST) END AS __rank FROM eligible) SELECT * EXCLUDE ({final_exclude}) FROM ranked WHERE {selection} ORDER BY {metric}_change {direction} NULLS LAST,entity_id"
     else:
         sql += f"SELECT *{excluded} FROM changes{threshold}"
         sql += " ORDER BY entity_id" if grouping else ""
-    return CompiledQuery(sql, current.parameters + previous.parameters)
+    ratios = {m+"_rate": (m+"_change", m+"_previous") for m in plan.metric_ids}
+    if plan.intent == "contribution":
+        ratios["contribution_rate"] = (plan.metric_ids[0]+"_change", "total_change")
+        if plan.contribution_within:
+            ratios["parent_contribution_rate"] = (plan.metric_ids[0]+"_change", "parent_change")
+    return CompiledQuery(sql, current.parameters + previous.parameters, ratios)
 
 
-def details(plan: AnalysisPlan) -> CompiledQuery:
+def details(plan: AnalysisPlan, context=LEGACY_CONTEXT) -> CompiledQuery:
     from app.facts import scope_ctes
-    ctes, parameters = scope_ctes(plan)
+    ctes, parameters = scope_ctes(plan, context)
     prefix = "WITH " + ",".join(ctes)
     if plan.detail_level == "orders":
         sql = """SELECT o.order_id AS entity_id,o.order_id AS entity_name,o.order_id,o.order_status,o.purchase_at,o.delivered_at,
@@ -91,12 +113,25 @@ def details(plan: AnalysisPlan) -> CompiledQuery:
     else:
         sql = """SELECT r.review_id AS entity_id,r.review_id AS entity_name,r.order_id,r.review_score,r.review_title,r.review_message,r.review_created_at,o.scope_match AS membership_confirmed
             FROM order_reviews r JOIN scoped_orders o ON o.order_id=r.order_id ORDER BY r.order_id,r.review_id"""
+    if context.excludes_orders and plan.detail_level in {"orders", "items"}:
+        alias = "o" if plan.detail_level == "orders" else "i"
+        sql = sql.replace(" AS membership_confirmed,", f" AS membership_confirmed,{eligible_sql(context, alias)} AS amount_eligible,") if plan.detail_level == "orders" else sql.replace(" AS membership_confirmed", f" AS membership_confirmed,{eligible_sql(context, alias)} AS amount_eligible")
+    if plan.audit_seller_id and plan.detail_level == "items":
+        sql = sql.replace(" AS membership_confirmed", " AS membership_confirmed,i.seller_id=? AS belongs_to_selected_seller")
+        parameters.append(plan.audit_seller_id)
     return CompiledQuery(prefix + " " + sql, tuple(parameters))
 
 
-def diagnose(plan: AnalysisPlan) -> CompiledQuery:
+def diagnose(plan: AnalysisPlan, context=LEGACY_CONTEXT) -> CompiledQuery:
+    from app.inspection import quality_query, order_candidate, order_audit
+    if plan.diagnosis in {"quality_summary", "quality_rows"}:
+        return quality_query(plan, context)
+    if plan.diagnosis == "order_candidate":
+        return order_candidate(plan, context)
+    if plan.diagnosis == "order_audit":
+        return order_audit(plan, context)
     if plan.diagnosis in {"reconciliation", "quality"}:
-        base = details(plan.model_copy(update={"detail_level": "orders"}))
+        base = details(plan.model_copy(update={"detail_level": "orders"}), context)
         if plan.diagnosis == "reconciliation":
             threshold = plan.diagnostic_threshold if plan.diagnostic_threshold is not None else .01
             sql = f"""WITH order_details AS ({base.sql}) SELECT entity_id,entity_name,order_id,order_sales,order_freight,payment_amount,
@@ -114,7 +149,7 @@ def diagnose(plan: AnalysisPlan) -> CompiledQuery:
             ORDER BY entity_id"""
         return CompiledQuery(sql, base.parameters)
     if plan.diagnosis == "sales_spike":
-        base = aggregate(plan.model_copy(update={"intent": "aggregate", "dimension": "month", "metric_ids": ["sales"], "min_group_count": 1}))
+        base = aggregate(plan.model_copy(update={"intent": "aggregate", "dimension": "month", "metric_ids": ["sales"], "min_group_count": 1}), context)
         threshold = plan.diagnostic_threshold if plan.diagnostic_threshold is not None else .3
         # 日期相邻才称为环比；缺月不会跳过后把两个月误作相邻。
         sql = f"""WITH monthly AS ({base.sql}), series AS (
@@ -123,7 +158,7 @@ def diagnose(plan: AnalysisPlan) -> CompiledQuery:
             WHERE DATE_DIFF('month',CAST(previous_month||'-01' AS DATE),CAST(entity_id||'-01' AS DATE))=1)
         SELECT * FROM changes WHERE ABS(change_rate)>=? ORDER BY entity_id"""
         return CompiledQuery(sql, base.parameters + (threshold,))
-    base = aggregate(plan.model_copy(update={"intent": "aggregate", "dimension": "seller", "metric_ids": ["delay_rate", "order_count"]}))
+    base = aggregate(plan.model_copy(update={"intent": "aggregate", "dimension": "seller", "metric_ids": ["delay_rate", "order_count"]}), context)
     threshold = plan.diagnostic_threshold if plan.diagnostic_threshold is not None else 2.0
     sql = f"""WITH sellers AS ({base.sql}), stats AS (SELECT *,AVG(delay_rate) OVER () AS mean_rate,STDDEV_POP(delay_rate) OVER () AS std_rate FROM sellers),
         scored AS (SELECT *, (delay_rate-mean_rate)/NULLIF(std_rate,0) AS z_score FROM stats)
@@ -131,14 +166,14 @@ def diagnose(plan: AnalysisPlan) -> CompiledQuery:
     return CompiledQuery(sql, base.parameters + (threshold,))
 
 
-def compile_advanced(plan: AnalysisPlan) -> CompiledQuery:
+def compile_advanced(plan: AnalysisPlan, context=LEGACY_CONTEXT) -> CompiledQuery:
     if plan.intent in {"compare", "contribution"}:
-        return comparison(plan)
+        return comparison(plan, context)
     if plan.intent == "details":
-        return details(plan)
+        return details(plan, context)
     if plan.intent == "diagnose":
-        return diagnose(plan)
-    return aggregate(plan)
+        return diagnose(plan, context)
+    return aggregate(plan, context)
 
 
 def audit_advanced(plan: AnalysisPlan, compiled: CompiledQuery):

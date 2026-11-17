@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DatasetId = str
-MetricId = Literal["sales", "order_count", "delay_rate", "avg_review", "low_score_rate", "repeat_customers", "payment_amount"]
+MetricId = Literal["sales", "freight", "order_count", "delay_rate", "avg_review", "low_score_rate", "repeat_customers", "payment_amount"]
 Dimension = Literal["total", "month", "category", "seller", "delivery_status", "customer_state"]
 GroupDimension = Literal["month", "category", "seller", "delivery_status", "customer_state"]
 AnalysisIntent = Literal["aggregate", "rank", "compare", "contribution", "details", "diagnose", "join_example"]
@@ -47,7 +47,7 @@ class Predicate(Contract):
 
 class PlanUpdate(Contract):
     operation: Literal["set", "remove", "reset"]
-    field: Literal["category_id", "seller_id", "customer_state", "product_id", "price", "freight_value", "order_sales", "order_freight", "payment_amount", "review_score", "order_id", "time_range", "comparison_range", "dimension", "group_by", "source_partition", "rank_within", "contribution_within", "contribution_direction", "metric_ids", "order_statuses", "time_field", "order_where", "item_where"] | None = None
+    field: Literal["category_id", "seller_id", "customer_state", "product_id", "price", "freight_value", "order_sales", "order_freight", "payment_amount", "review_score", "order_id", "time_range", "comparison_range", "dimension", "group_by", "source_partition", "rank_within", "contribution_within", "contribution_direction", "metric_ids", "order_statuses", "time_field", "order_where", "item_where", "intent", "top_n", "min_group_count", "detail_level", "limit_mode"] | None = None
     values: list[str | int | float] = Field(default_factory=list)
     predicate: Predicate | None = None
     period: TimeRange | None = None
@@ -61,6 +61,12 @@ class AnalysisPlan(Contract):
     metadata_version: str
     intent: Literal["aggregate", "rank", "compare", "explain", "clarify", "unsupported", "load_catalog", "join_example", "contribution", "details", "diagnose", "workflow", "history", "update", "continue"]
     update: PlanUpdate | None = None
+    updates: list[PlanUpdate] = Field(default_factory=list, max_length=16)
+    scope_source: Literal["working", "analysis", "view"] = "working"
+    output_mode: Literal["analysis", "seller_audit", "customer_summary", "quality_check"] = "analysis"
+    limitations: list[Literal["causality", "profit"]] = Field(default_factory=list, max_length=2)
+    limit_mode: Literal["top_n", "all"] = "top_n"
+    binding_updates: list[PlanUpdate] = Field(default_factory=list, max_length=16)
     metric_ids: list[MetricId] = Field(default_factory=list)
     dimension: Dimension = "total"
     group_by: list[GroupDimension] | None = Field(default=None, max_length=2)
@@ -86,7 +92,10 @@ class AnalysisPlan(Contract):
     item_where: Predicate | None = None
     detail_level: Literal["orders", "items", "payments", "reviews"] = "orders"
     selected_order_id: str | None = None
-    diagnosis: Literal["reconciliation", "quality", "sales_spike", "seller_outlier"] = "reconciliation"
+    diagnosis: Literal["reconciliation", "quality", "sales_spike", "seller_outlier", "quality_summary", "quality_rows", "order_candidate", "order_audit"] = "reconciliation"
+    quality_scope: Literal["current", "previous", "comparison_union"] = "comparison_union"
+    quality_types: list[Literal["exact_duplicate", "price_conflict", "missing_payment", "other"]] = Field(default_factory=lambda: ["exact_duplicate", "price_conflict", "missing_payment"], min_length=1, max_length=4)
+    audit_seller_id: str | None = None
     diagnostic_threshold: float | None = Field(default=None, ge=0)
     period_mode: Literal["explicit_range", "full_coverage"] = "explicit_range"
     comparison_mode: Literal["none", "fixed", "previous_month"] = "none"
@@ -102,6 +111,8 @@ class AnalysisPlan(Contract):
 
     @model_validator(mode="after")
     def normalize_grouping(self):
+        if self.update is not None and self.updates:
+            raise ValueError("update 与 updates 不能同时提供")
         if self.group_by is not None:
             if len(set(self.group_by)) != len(self.group_by):
                 raise ValueError("分组维度不能重复")
@@ -127,6 +138,18 @@ class QueryResult(Contract):
     export_file: str | None = None
     row_count: int | None = None
     quality: list[dict] = Field(default_factory=list)
+    ratios: list[dict] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def restore_exact_values(self):
+        from app.result_math import restore_numbers
+        from decimal import Decimal
+        restore_numbers(self.columns, self.rows, self.ratios)
+        for row in self.quality:
+            for q in row.values():
+                if q and isinstance(q.get("known_value"), str):
+                    q["known_value"] = Decimal(q["known_value"])
+        return self
 
 
 class ComparisonRequest(Contract):

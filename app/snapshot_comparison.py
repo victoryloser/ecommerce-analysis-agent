@@ -64,6 +64,12 @@ def comparison_text(state):
         effect = "未确认" if result["revision_effect"] is None else result["revision_effect"]
         status = "通过" if result["verified"] is True else "暂不能确认" if result["verified"] is None else "不一致"
         lines[-1] += f"\n| {label(result['metric'])} / {result['entity_id']} | " + " | ".join(values) + f" | {effect} | {status} |"
+    eligibility = [r for r in report["metric_comparisons"] if r.get("membership") and (r["membership"].get("eligibility_entered_count") or r["membership"].get("eligibility_exited_count"))]
+    for row in eligibility[:10]:
+        bridge = row["membership"]
+        lines.append(f"{row['period']} · {label(row['metric'])} / {row['entity_name']}：金额资格恢复 {bridge['eligibility_entered_value']} 元，资格退出 {bridge['eligibility_exited_value']} 元；这是报表准入变化，不是订单删除或冲突金额估计。")
+    if any(r.get("membership") and not r["membership"].get("attribution_complete", True) for r in report["metric_comparisons"]):
+        lines.append("部分订单范围归属未知，虽可核对报表贡献差额，仍不能将这些差额确定归因为业务范围进入或退出；详见归属未确认差额。")
     lines.append("范围进入/退出是查询成员变化，不代表新增/取消交易；共同键金额修订与进入范围金额不重复相加。")
     return "\n\n".join(lines)
 

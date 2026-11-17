@@ -1,4 +1,4 @@
-"""复赛暂定规则：同键完全重复归并，金额冲突保留身份并置未知。"""
+"""共享归并与质量证据；报表金额资格由绑定的计算规则决定。"""
 import json
 from decimal import Decimal
 from collections import defaultdict
@@ -42,11 +42,19 @@ def normalize_rows(table, rows):
     return normalized, issues
 
 
+def decode_metric_quality(raw):
+    quality = json.loads(raw, parse_float=Decimal)
+    for q in quality.values():
+        if q and isinstance(q.get("known_value"), str):
+            q["known_value"] = Decimal(q["known_value"])
+    return quality
+
+
 def decode_quality(columns, rows):
     if "__quality" not in columns:
-        return columns, rows, []
+        return columns, [list(row) for row in rows], []
     index = columns.index("__quality")
-    quality = [json.loads(row[index], parse_float=Decimal) for row in rows]
+    quality = [decode_metric_quality(row[index]) for row in rows]
     return columns[:index] + columns[index+1:], [list(row[:index]) + list(row[index+1:]) for row in rows], quality
 
 
@@ -54,11 +62,22 @@ def exact_sum(column):
     return f"CASE WHEN COUNT(*)=COUNT({column}) THEN SUM({column}) END"
 
 
+def calculation_determined(q):
+    return q.get("calculation_status", "determined" if q.get("completeness") == "complete" else "insufficient_data") == "determined"
+
+
 def quality_note(row):
     from app.answers import label
     parts = []
     for metric, q in row.items():
-        if q and q["completeness"] != "complete":
+        if not q:
+            continue
+        if q.get("amount_basis") == "policy_eligible" and q["completeness"] != "complete":
+            state = "已知准入范围可计算" if calculation_determined(q) else "准入范围仍有金额或归属未知"
+            parts.append(f"{label(metric)}：{state}；确定准入 {q['policy_eligible_order_count']} 笔，确定排除 {q['excluded_order_count']} 笔，排除候选归属未知 {q['excluded_candidate_order_count']} 笔；不代表完整总体金额")
+        elif q["completeness"] != "complete":
             known = q["known_value"] if q["known_count"] else "暂无可确认值"
             parts.append(f"{label(metric)}：总值未知，已确认部分 {known}；数值未知 {q['value_unknown_count']}，归属未知 {q['membership_unknown_count']}，缺记录 {q.get('missing_record_count', 0)}，影响订单 {q['affected_order_count']}")
-    return "；".join(parts) or "完整"
+        if q.get("group_eligibility") == "uncertain":
+            parts.append("订单数门槛是否满足仍未知，不能确认名次")
+    return "；".join(dict.fromkeys(parts)) or "完整"

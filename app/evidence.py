@@ -35,7 +35,7 @@ def write_evidence(session: Session, manifest: dict, question: str, plan: Analys
     if provenance:
         record["provenance"] = provenance
     if result:
-        serialized = json.dumps({"columns": result.columns, "rows": result.rows, "quality": result.quality}, ensure_ascii=False, default=str, sort_keys=True)
+        serialized = json.dumps({"columns": result.columns, "rows": result.rows, "quality": result.quality, "ratios": result.ratios}, ensure_ascii=False, default=str, sort_keys=True)
         record["result_sha256"] = hashlib.sha256(serialized.encode()).hexdigest()
     directory = RUNS_DIR / session.dataset_id
     directory.mkdir(parents=True, exist_ok=True)

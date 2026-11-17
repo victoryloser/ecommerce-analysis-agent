@@ -11,7 +11,8 @@ import duckdb
 from app.config import DATA_DIR, DATASETS, METADATA_VERSION, ROOT
 from app.semantic import metadata_hash
 from app.source import FOREIGN_KEYS, PRIMARY_KEYS, SCHEMA, read_source, source_files
-from app.quality import ISSUE_SCHEMA, QUALITY_RULE_VERSION, normalize_rows
+from app.quality import ISSUE_SCHEMA, normalize_rows
+from app.calculation import CalculationContext, LEGACY_RULE
 from app.snapshots import FINGERPRINT_VERSION, publish_alias, table_fingerprints
 
 
@@ -26,7 +27,8 @@ def import_dataset(dataset_id: str, data_dir=DATA_DIR) -> dict:
 
 
 def import_tables(dataset_id: str, tables: dict, sources: list, name: str, data_dir=DATA_DIR, *, practice=None,
-                  business_label="", parent_dataset_id=None, change_note="", data_origin="constructed", source_kind=None) -> dict:
+                  business_label="", parent_dataset_id=None, change_note="", data_origin="constructed", source_kind=None, quality_rule_version=LEGACY_RULE) -> dict:
+    context = CalculationContext(quality_rule_version)
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / f"{dataset_id}.duckdb"
     if path.exists() or (data_dir / f"{dataset_id}.manifest.json").exists():
@@ -112,11 +114,11 @@ def import_tables(dataset_id: str, tables: dict, sources: list, name: str, data_
         "business_label": business_label or name, "parent_dataset_id": parent_dataset_id, "change_note": change_note,
         "data_origin": data_origin, "source_kind": source_kind,
         "fingerprint_version": FINGERPRINT_VERSION, "semantic_fingerprints": fingerprints,
-        "quality_rule_version": QUALITY_RULE_VERSION, "normalized_row_counts": normalized_counts,
+        "quality_rule_version": context.rule_version, "normalized_row_counts": normalized_counts,
         "imported_at": datetime.now(timezone.utc).isoformat(),
         "sources": retained,
         "schema_sha256": hashlib.sha256(json.dumps(SCHEMA, sort_keys=True).encode()).hexdigest(),
-        "metadata_sha256": metadata_hash(),
+        "metadata_sha256": metadata_hash(context),
         "row_counts": {table: len(tables[table]) for table in SCHEMA}, "quality": quality,
         "coverage": {"start": earliest.replace(day=1).date().isoformat(), "end": f"{end_year:04d}-{end_month:02d}-01", "first_record": str(earliest), "last_record": str(latest)},
         "coverage_fields": coverage_fields,

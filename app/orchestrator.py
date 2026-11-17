@@ -50,11 +50,13 @@ class AnalysisAgent:
             session.workflow_tasks.clear()
             session.focus_step = None
             session.comparison_state.clear()
+            session.analysis_anchor = None
+            session.view_focus.clear()
             return Turn("已清空当前分析条件和待澄清问题。", {})
         executor = self.executors[session.dataset_id]
         try:
             plan, attempts = make_plan(self.provider, executor.manifest, session, question, practice_context, trace)
-        except (PlanError, BudgetError) as error:
+        except ValueError as error:
             text = str(error)
             trace.record("plan_rejected", reason=text)
             session.remember(question, text)
@@ -75,7 +77,9 @@ class AnalysisAgent:
         if plan.intent not in {"explain", "unsupported"}:
             session.working_plan = plan
             session.workflow_tasks = []
+            session.workflow_evidence = {}
             session.focus_step = None
+            session.view_focus = {"record_id": session.analysis_evidence.get("record_id")}
         turn = self.run_plan(session, plan, question, attempts, trace)
         session.remember(question, turn.text)
         return turn
@@ -100,6 +104,8 @@ class AnalysisAgent:
         from app.workflow import reconcile_tasks, bind_step
         session.workflow_tasks = reconcile_tasks(session.working_plan, plan, session.workflow_tasks)
         session.working_plan = plan.model_copy(deep=True)
+        anchor_before = session.analysis_anchor or session.analysis_evidence.get("record_id")
+        session.view_focus = {"record_id": session.analysis_evidence.get("record_id")}
         if session.focus_step is None or session.focus_step > len(plan.steps):
             session.focus_step = 1
         self.save_workflow_progress(session, question, attempts, trace)
@@ -122,7 +128,12 @@ class AnalysisAgent:
                     provenance.update(source_record_id=source["record_id"], source_step=template.source_step, bind_field=template.bind_field,
                                       bind_mode=template.bind_mode, source_partition=template.source_partition, value=value)
                     trace.record("workflow_bound", **provenance)
-                turn = self.run_plan(session, step, f"{question}（步骤{index+1}）", 0, trace, provenance=provenance)
+                    if step.binding_updates:
+                        from app.plan_update import apply_updates
+                        updates = step.binding_updates
+                        step = apply_updates(step.model_copy(update={"binding_updates": []}), updates, self.executors[session.dataset_id].manifest)
+                        provenance["binding_updates"] = [u.model_dump(mode="json") for u in updates]
+                turn = self.run_plan(session, step, f"{question}（步骤{index+1}）", 0, trace, provenance=provenance, update_anchor=False)
                 result = turn.evidence.get("result")
                 status = "needs_input" if step.intent == "clarify" else "unsupported" if step.intent == "unsupported" else "failed" if result and result["status"] not in {"ok", "empty"} else "completed"
                 task.update(status=status, reason=result.get("error") or "" if result else step.clarification or "",
@@ -135,7 +146,8 @@ class AnalysisAgent:
         needs_input = next((i for i, task in enumerate(session.workflow_tasks) if task["status"] == "needs_input"), None)
         if needs_input is not None:
             session.focus_step = needs_input + 1
-        text = "\n\n".join(f"### 步骤{i+1} · {task['status']}\n\n{task['text']}" for i, task in enumerate(session.workflow_tasks))
+        from app.business_answers import workflow_answer
+        text = workflow_answer(plan, session.workflow_tasks, self.executors[session.dataset_id].manifest)
         evidence = self.save_workflow_progress(session, question, attempts, trace)
         from app.presentation import display_evidence
         from app.models import AnalysisPlan, QueryResult
@@ -144,22 +156,25 @@ class AnalysisAgent:
             session.last_successful_plan = AnalysisPlan.model_validate(shown["plan"])
             session.last_result = QueryResult.model_validate(shown["result"])
             session.analysis_evidence = shown
+            session.view_focus = {"record_id": shown["record_id"], "step": session.focus_step}
+        session.analysis_anchor = anchor_before if plan.output_mode == "quality_check" else shown.get("record_id", anchor_before)
+        self.checkpoint(session)
         session.remember(question, text)
         return Turn(text, evidence)
 
     def update_conditions(self, session, update):
-        from app.plan_update import apply_update
+        from app.plan_update import apply_updates
+        from app.clarification import bind_entities
         from app.semantic import validate_plan
         base = session.working_plan or session.last_successful_plan
         if base is None:
             raise PlanError("请先建立分析")
-        plan = base
-        for change in update if isinstance(update, list) else [update]:
-            if base.intent == "workflow" and change.target_step is None:
-                change = change.model_copy(update={"target_step": session.focus_step})
-            plan = apply_update(plan, change, self.executors[session.dataset_id].manifest, session.workflow_tasks)
+        plan = apply_updates(base, update, self.executors[session.dataset_id].manifest, session.workflow_tasks, session.focus_step)
+        plan = bind_entities(plan, self.executors[session.dataset_id].manifest, "")
         validate_plan(plan, self.executors[session.dataset_id].manifest)
         with TurnTrace(session.session_id, session.dataset_id, "更新分析条件", "condition-update") as trace:
+            trace.record("conditions_updated", updates=[u.model_dump(mode="json") for u in (update if isinstance(update, list) else [update])],
+                         before=base.model_dump(mode="json", exclude_defaults=True), after=plan.model_dump(mode="json", exclude_defaults=True))
             if plan.intent == "workflow":
                 turn = self.run_workflow(session, plan, "更新分析条件", 0, trace)
             else:
@@ -196,28 +211,140 @@ class AnalysisAgent:
             self.checkpoint(fresh)
         return fresh, turn
 
-    def quality_details(self, session):
-        from app.facts import scope_ctes
-        from app.quality import QUERY_SCHEMA
-        from app.query_worker import run_query
-        from app.sql_compiler import CompiledQuery
-        from app.sql_guard import validate_sql
-        plan = session.last_successful_plan
+    def quality_details(self, session, *, specified=False):
+        from copy import deepcopy
+        from app.task_shapes import expand_output
+        from app.semantic import validate_plan
+        plan = session.analysis_plan()
         if plan is None or plan.time_range is None:
             raise PlanError("请先选择一份分析结果")
-        ctes, parameters = scope_ctes(plan)
-        sql = "WITH " + ",".join(ctes) + " SELECT q.* FROM quality_issues q JOIN scoped_orders o ON o.order_id=q.order_id ORDER BY q.issue_id"
-        validate_sql(sql, schema=QUERY_SCHEMA, exploration=True)
+        if plan.intent == "workflow":
+            plan = plan.steps[(session.focus_step or 1)-1]
+        plan = plan.model_copy(update={"quality_types": ["exact_duplicate", "price_conflict", "missing_payment"] + ([] if specified else ["other"])})
+        plan = expand_output(plan.model_copy(update={"output_mode": "quality_check", "steps": [], "intent": "aggregate"}))
         executor = self.executors[session.dataset_id]
-        with TurnTrace(session.session_id, session.dataset_id, "查看质量依据", "quality-evidence") as trace:
-            trace.consume("query")
-            result = run_query(executor.path, CompiledQuery(sql, tuple(parameters)))
+        validate_plan(plan, executor.manifest)
+        view_session = deepcopy(session)
+        if session.view_focus.get("kind") == "quality":
+            previous = session.focused_evidence()
+            if previous.get("source_record_id") == (session.analysis_anchor or session.analysis_evidence.get("record_id")):
+                previous_tasks = previous.get("tasks", [])
+                if [t.get("evidence", {}).get("plan") for t in previous_tasks] == [p.model_dump(mode="json") for p in plan.steps]:
+                    view_session.working_plan, view_session.workflow_tasks = plan, previous_tasks
+        viewer = AnalysisAgent(None, self.executors)
+        with TurnTrace(session.session_id, session.dataset_id, "查看两期质量依据", "quality-evidence") as trace:
+            turn = viewer.run_workflow(view_session, plan, "查看质量依据", 0, trace)
+            summary, detail = view_session.workflow_tasks
+            record = detail["evidence"]
             evidence = write_artifact(session, executor.manifest, "quality_details", "查看质量依据",
-                {"result": result.model_dump(mode="json"), "sql": sql, "parameters": parameters,
-                 "source_record_id": session.analysis_evidence["record_id"]}, trace)
-            return Turn("当前分析范围的质量记录；来源行号按导入表定位，完整候选值保留在记录中。", evidence)
+                {"result": record["result"], "plan": record["plan"], "sql": record["sql"], "parameters": record["parameters"],
+                 "summary": summary["evidence"], "source_record_id": session.analysis_anchor or session.analysis_evidence.get("record_id"),
+                 "tasks": view_session.workflow_tasks}, trace)
+            session.view_focus = {"record_id": evidence["record_id"], "kind": "quality", "parent_record_id": evidence["source_record_id"]}
+            self.checkpoint(session)
+            return Turn(turn.text, evidence)
 
-    def run_plan(self, session, plan, question, attempts, trace, provenance=None):
+    def quality_sources(self, session, order_id):
+        from app.inspection_sources import source_records
+        executor = self.executors[session.dataset_id]
+        with TurnTrace(session.session_id, session.dataset_id, "查看问题原始记录", "source-evidence") as trace:
+            trace.consume("source")
+            payload = source_records(executor, session, order_id)
+            evidence = write_artifact(session, executor.manifest, "source_records", "查看问题原始记录", payload, trace)
+        session.view_focus["order_id"] = order_id
+        self.checkpoint(session)
+        return evidence
+
+    def quality_export(self, session):
+        from copy import deepcopy
+        record = session.focused_evidence()
+        if record.get("type") != "quality_details":
+            raise PlanError("请先打开质量依据")
+        viewing = deepcopy(session)
+        viewing.last_evidence = {**record, "type": "query"}
+        return self.export(viewing)
+
+    def resume_inspection(self, session):
+        if session.view_focus.get("kind") != "inspection":
+            return self.respond(session, "/continue")
+        from copy import deepcopy
+        from app.models import AnalysisPlan, QueryResult
+        from app.presentation import display_evidence
+        root = session.selected_workflow()
+        viewing = deepcopy(session)
+        viewing.working_plan = AnalysisPlan.model_validate(root["plan"])
+        viewing.workflow_tasks = root["tasks"]
+        viewing.focus_step = session.view_focus.get("step", 1)
+        viewer = AnalysisAgent(None, self.executors)
+        with TurnTrace(session.session_id, session.dataset_id, "继续订单核查", "inspection-resume") as trace:
+            turn = viewer.run_workflow(viewing, viewing.working_plan, "继续订单核查", 0, trace)
+        shown = display_evidence(turn.evidence)
+        session.last_evidence = turn.evidence
+        if shown.get("type") == "query":
+            session.last_successful_plan = AnalysisPlan.model_validate(shown["plan"])
+            session.last_result = QueryResult.model_validate(shown["result"])
+            session.analysis_evidence = shown
+        session.view_focus.update(workflow_id=turn.evidence["record_id"], record_id=shown.get("record_id"))
+        session.remember("继续订单核查", turn.text)
+        self.checkpoint(session)
+        return turn
+
+    def audit_order(self, session, row_index):
+        from copy import deepcopy
+        from app.models import AnalysisPlan, QueryResult, EntityFilter
+        from app.presentation import display_evidence
+        from app.task_shapes import expand_output
+        parent = display_evidence(session.last_evidence)
+        if parent.get("type") != "query":
+            raise PlanError("请在商家排名或订单明细中选择记录")
+        source = AnalysisPlan.model_validate(parent["plan"])
+        result = parent["result"]
+        if not 0 <= row_index < len(result["rows"]):
+            raise PlanError("请选择当前页记录")
+        row = dict(zip(result["columns"], result["rows"][row_index]))
+        seller = row.get("seller_id") or (row.get("entity_id") if source.dimension == "seller" else source.audit_seller_id)
+        if not seller:
+            sellers = [f for f in source.filters if f.field == "seller_id" and len(f.values) == 1]
+            seller = sellers[0].values[0] if len(sellers) == 1 else None
+        if not seller:
+            raise PlanError("整单核查需要明确商家；请从商家结果进入")
+        base = source.model_copy(update={"intent": "aggregate", "output_mode": "seller_audit", "steps": [],
+            "filters": [f for f in source.filters if f.field != "seller_id"] + [EntityFilter(field="seller_id", values=[seller])],
+            "selected_order_id": row.get("order_id"), "comparison_range": None, "comparison_mode": "none"})
+        bundle = expand_output(base)
+        steps = bundle.steps[1:]
+        steps[0] = steps[0].model_copy(update={"source_step": None, "bind_field": None})
+        steps[1:] = [s.model_copy(update={"source_step": 1}) for s in steps[1:]]
+        if row.get("order_id"):
+            if row.get("membership_confirmed") is not True:
+                raise PlanError("订单归属尚未确认，请先明确范围")
+            steps = [s.model_copy(update={"source_step": None, "bind_field": None, "selected_order_id": row["order_id"],
+                         "audit_seller_id": seller, "filters": [], "order_where": None, "item_where": None}) for s in steps[1:]]
+        bundle = bundle.model_copy(update={"steps": steps})
+        from app.semantic import validate_plan
+        executor = self.executors[session.dataset_id]
+        validate_plan(bundle, executor.manifest)
+        viewing = deepcopy(session)
+        viewing.workflow_tasks = []
+        viewing.working_plan = None
+        viewing.focus_step = 1 if row.get("order_id") else 2
+        viewer = AnalysisAgent(None, self.executors)
+        with TurnTrace(session.session_id, session.dataset_id, "核查整单", "order-inspection") as trace:
+            trace.record("inspection_requested", source_record_id=parent["record_id"], seller_id=seller, order_id=row.get("order_id"))
+            turn = viewer.run_workflow(viewing, bundle, "核查整单", 0, trace)
+        session.drill_stack.append(parent)
+        session.last_evidence = turn.evidence
+        shown = display_evidence(turn.evidence)
+        if shown.get("type") == "query":
+            session.last_successful_plan = AnalysisPlan.model_validate(shown["plan"])
+            session.last_result = QueryResult.model_validate(shown["result"])
+            session.analysis_evidence = shown
+        session.view_focus = {"kind": "inspection", "record_id": shown.get("record_id"), "workflow_id": turn.evidence["record_id"], "step": viewing.focus_step}
+        session.remember("核查整单", turn.text)
+        self.checkpoint(session)
+        return turn
+
+    def run_plan(self, session, plan, question, attempts, trace, provenance=None, *, update_anchor=True):
         executor = self.executors[session.dataset_id]
         if plan.intent in {"clarify", "unsupported"}:
             session.pending_plan = plan if plan.intent == "clarify" else None
@@ -242,9 +369,14 @@ class AnalysisAgent:
                 session.last_result = result
                 session.analysis_evidence = evidence
                 session.drill_stack.clear()
+                if update_anchor:
+                    session.analysis_anchor = evidence["record_id"]
+                session.view_focus = {"record_id": evidence["record_id"]}
         return Turn(text, evidence)
 
     def drill(self, session: Session, row_index: int, target: str) -> Turn:
+        if target == "audit_order":
+            return self.audit_order(session, row_index)
         from app.drilldown import drill_plan
         executor = self.executors[session.dataset_id]
         from app.presentation import display_evidence
@@ -265,12 +397,14 @@ class AnalysisAgent:
             text = answer(plan, result, executor.manifest)
             if result.status in {"ok", "empty"}:
                 session.drill_stack.append(parent)
+                if session.working_plan is None:
+                    session.working_plan = session.last_successful_plan
                 session.last_successful_plan, session.last_result = plan, result
-                session.working_plan = plan
-                session.focus_step = None
-                session.workflow_tasks.clear()
+                session.analysis_anchor = session.analysis_anchor or parent["record_id"]
+                session.view_focus = {"record_id": evidence["record_id"], "parent_record_id": parent["record_id"],
+                                      "entity_id": selected.get("entity_id"), "order_id": plan.selected_order_id,
+                                      "step": session.focus_step}
                 session.analysis_evidence = evidence
-                session.pending_plan = None
             session.last_evidence = evidence
             session.remember(question, text)
             if self.store:
@@ -283,10 +417,11 @@ class AnalysisAgent:
             raise PlanError("当前没有上层分析")
         evidence = session.drill_stack.pop()
         session.last_successful_plan = AnalysisPlan.model_validate(evidence["plan"])
-        session.working_plan = session.last_successful_plan
+        if session.working_plan is None:
+            session.working_plan = session.last_successful_plan
         session.last_result = QueryResult.model_validate(evidence["result"])
         session.last_evidence = session.analysis_evidence = evidence
-        session.pending_plan = None
+        session.view_focus = {"record_id": evidence["record_id"], "step": session.focus_step}
         text = answer(session.last_successful_plan, session.last_result, self.executors[session.dataset_id].manifest)
         session.remember("返回上层分析", text)
         if self.store:
@@ -320,6 +455,7 @@ class AnalysisAgent:
                 session.last_result = result
                 session.last_successful_plan = plan
                 session.analysis_evidence = new
+                session.view_focus = {**session.view_focus, "record_id": new["record_id"]}
             session.last_evidence = new
             if self.store:
                 self.store.save(session, executor.manifest)
@@ -345,10 +481,10 @@ class AnalysisAgent:
             plan = AnalysisPlan.model_validate(evidence["plan"])
             from app.semantic import validate_plan
             validate_plan(plan, executor.manifest)
-            compiled = compile_query(plan)
+            compiled = compile_query(plan, executor.context)
             from app.quality import QUERY_SCHEMA
             validate_sql(compiled.sql, schema=QUERY_SCHEMA, exploration=extended(plan))
-            audit_query(plan, compiled)
+            audit_query(plan, compiled, executor.context)
         else:
             raise PlanError("请先执行查询再导出")
         directory = RUNS_DIR / session.dataset_id

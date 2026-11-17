@@ -10,7 +10,8 @@ from pathlib import Path
 import duckdb
 
 from app.models import AnalysisPlan
-from app.quality import QUERY_SCHEMA
+from app.calculation import CalculationContext, LEGACY_CONTEXT, eligible_sql
+from app.quality import QUERY_SCHEMA, decode_metric_quality
 from app.snapshots import canonical, quality_signature
 from app.source import SCHEMA, PRIMARY_KEYS
 from app.sql_compiler import compile_query
@@ -18,8 +19,8 @@ from app.sql_audit import audit_query
 from app.sql_guard import validate_sql
 from app.grouping import dimensions, entity_sql, result_columns
 
-DIFF_VERSION = "snapshot-diff-v1"
-ADDITIVE = {"sales", "payment_amount", "order_count", "repeat_customers"}
+DIFF_VERSION = "snapshot-diff-v2"
+ADDITIVE = {"sales", "freight", "payment_amount", "order_count", "repeat_customers"}
 ORDER_PROJECTION = """WITH i AS (
     SELECT order_id,COUNT(*) AS item_count,SUM(price) AS sales_known,
         CASE WHEN COUNT(*)=COUNT(price) THEN SUM(price) END AS sales,
@@ -70,13 +71,13 @@ def numeric_delta(a, b):
     return b-a if a is not None and b is not None else None
 
 
-def read_analysis(conn, plan, statements):
-    compiled = compile_query(plan)
-    audit_query(plan, compiled)
+def read_analysis(conn, plan, statements, context=LEGACY_CONTEXT):
+    compiled = compile_query(plan, context)
+    audit_query(plan, compiled, context)
     result = []
     for row in rows(conn, compiled.sql, compiled.parameters, statements):
         raw = row.pop("__quality", "{}")
-        row["quality"] = json.loads(raw, parse_float=Decimal)
+        row["quality"] = decode_metric_quality(raw)
         result.append(row)
     return result
 
@@ -86,7 +87,7 @@ def value_state(row, metric):
         return {"state": "absent", "value": Decimal(0) if metric in ADDITIVE else None, "quality": {}}
     q = row["quality"][metric]
     value = row[metric]
-    state = "unknown" if q["completeness"] != "complete" else "not_applicable" if value is None else "known"
+    state = "unknown" if q.get("calculation_status", "determined" if q["completeness"] == "complete" else "insufficient_data") == "insufficient_data" else "not_applicable" if value is None else "known"
     return {"state": state, "value": value, "quality": q}
 
 
@@ -96,12 +97,13 @@ def scope_contract(plan):
              "order_where", "item_where", "selected_order_id", "metric_ids", "min_group_count")}}
 
 
-def member_projection(plan, metric):
+def member_projection(plan, metric, context=LEGACY_CONTEXT):
     from app.facts import scope_ctes
-    ctes, parameters = scope_ctes(plan)
+    ctes, parameters = scope_ctes(plan, context)
     entity, _ = entity_sql(plan)
-    if metric == "sales":
-        sql = f"""SELECT i.order_id,i.order_item_id,{entity} AS entity_id,i.price AS value,
+    if metric in {"sales", "freight"}:
+        field = "price" if metric == "sales" else "freight_value"
+        sql = f"""SELECT i.order_id,i.order_item_id,{entity} AS entity_id,i.{field} AS value,{eligible_sql(context, "i")} AS amount_eligible,
             (o.scope_match AND i.item_match) AS member
             FROM items i JOIN scoped_orders o ON o.order_id=i.order_id"""
     else:
@@ -136,31 +138,51 @@ def review_samples(conn, plan, statements):
     return {r["entity_id"]: r for r in rows(conn, sql, parameters, statements)}
 
 
-def compare_members(conns, plans, metric, statements, emit, period, order_sets):
+def compare_members(conns, plans, metric, statements, emit, period, order_sets, contexts):
     members = []
-    for conn, plan, log in zip(conns, plans, statements):
-        sql, params = member_projection(plan, metric)
+    for conn, plan, log, context in zip(conns, plans, statements, contexts):
+        sql, params = member_projection(plan, metric, context)
         members.append({canonical([r["order_id"], r["order_item_id"], r["entity_id"]]): r for r in rows(conn, sql, params, log)})
     summaries = {}
     for key in sorted(members[0].keys() | members[1].keys()):
         a, b = members[0].get(key), members[1].get(key)
         entity = (a or b)["entity_id"]
         summary = summaries.setdefault(entity, {"common_change": Decimal(0), "entered_value": Decimal(0), "exited_value": Decimal(0),
-            "common_count": 0, "entered_count": 0, "exited_count": 0, "unknown_count": 0})
-        if (a and (a["member"] is None or a["value"] is None)) or (b and (b["member"] is None or b["value"] is None)):
+            "eligibility_entered_value": Decimal(0), "eligibility_exited_value": Decimal(0), "scope_uncertain_change": Decimal(0),
+            "common_count": 0, "entered_count": 0, "exited_count": 0, "unknown_count": 0,
+            "eligibility_entered_count": 0, "eligibility_exited_count": 0, "attribution_complete": True})
+        def contribution(row):
+            if row is None or row["member"] is False or not row.get("amount_eligible", True):
+                return Decimal(0)
+            return row["value"] if row["member"] is True else None
+        av, bv = contribution(a), contribution(b)
+        if av is None or bv is None:
             category, amount = "unconfirmed", None
             summary["unknown_count"] += 1
-        elif a and b:
-            category, amount = "common", b["value"]-a["value"]
-            summary["common_change"] += amount
-            summary["common_count"] += 1
-        elif b:
-            category, amount = "entered", b["value"]
+        elif (a and a["member"] is None) or (b and b["member"] is None):
+            category, amount = "scope_uncertain", bv-av
+            summary["scope_uncertain_change"] += amount
+            summary["attribution_complete"] = False
+        elif a and b and a["member"] is True and b["member"] is True:
+            if a.get("amount_eligible", True) and not b.get("amount_eligible", True):
+                category, amount = "eligibility_exited", -av
+                summary["eligibility_exited_value"] += av
+                summary["eligibility_exited_count"] += 1
+            elif not a.get("amount_eligible", True) and b.get("amount_eligible", True):
+                category, amount = "eligibility_entered", bv
+                summary["eligibility_entered_value"] += bv
+                summary["eligibility_entered_count"] += 1
+            else:
+                category, amount = "common", bv-av
+                summary["common_change"] += amount
+                summary["common_count"] += 1
+        elif b and b["member"] is True:
+            category, amount = "entered", bv
             summary["entered_value"] += amount
             summary["entered_count"] += 1
         else:
-            category, amount = "exited", a["value"]
-            summary["exited_value"] += amount
+            category, amount = "exited", -av
+            summary["exited_value"] += av
             summary["exited_count"] += 1
         if category != "common" or amount:
             oid = (a or b)["order_id"]
@@ -168,15 +190,17 @@ def compare_members(conns, plans, metric, statements, emit, period, order_sets):
             emit("membership", [period, metric, entity, oid, (a or b)["order_item_id"]], category,
                  a, b, {"amount": amount, "source_presence": source_presence})
     for result in summaries.values():
-        result["delta"] = None if result["unknown_count"] else result["common_change"] + result["entered_value"] - result["exited_value"]
+        result["delta"] = None if result["unknown_count"] else result["common_change"] + result["entered_value"] - result["exited_value"] + result["eligibility_entered_value"] - result["eligibility_exited_value"] + result["scope_uncertain_change"]
     return summaries
 
 
 def compare_snapshots(paths, plans, directory, comparable=True):
+    contexts = [CalculationContext.from_manifest(json.loads(Path(path).with_suffix(".manifest.json").read_text(encoding="utf-8"))) for path in paths]
+    comparable = comparable and contexts[0] == contexts[1]
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
-    report = {"algorithm_version": DIFF_VERSION, "status": "completed", "structural_diff": {}, "business_diff": {},
+    report = {"algorithm_version": DIFF_VERSION, "rule_versions": [c.rule_version for c in contexts], "status": "completed", "structural_diff": {}, "business_diff": {},
               "quality_diff": {"changed": 0, "preview": []}, "metric_comparisons": [], "reconciliation": [], "preview": [], "diff_rows": 0}
     statements = [[], []]
     order_sets = [set(), set()]
@@ -259,8 +283,8 @@ def compare_snapshots(paths, plans, directory, comparable=True):
             for field in scope_contract(plans[0]) if scope_contract(plans[0])[field] != scope_contract(plans[1])[field]}
         comparable = comparable and not report["scope_changes"]
         display_sets = []
-        for conn, plan, log in zip(conns, plans, statements):
-            display_sets.append({canonical(r.get("entity_id", "all")) for r in read_analysis(conn, plan, log)}
+        for conn, plan, log, context in zip(conns, plans, statements, contexts):
+            display_sets.append({canonical(r.get("entity_id", "all")) for r in read_analysis(conn, plan, log, context)}
                                 if plan.intent in {"rank", "contribution"} or plan.min_group_count > 1 else None)
         period_results = {}
         for role in ("current", "previous"):
@@ -271,11 +295,11 @@ def compare_snapshots(paths, plans, directory, comparable=True):
             metrics = plans[0].metric_ids
             if not metrics:
                 continue
-            results = [read_analysis(conn, p, log) for conn, p, log in zip(conns, current_plans, statements)]
+            results = [read_analysis(conn, p, log, context) for conn, p, log, context in zip(conns, current_plans, statements, contexts)]
             sample_maps = [review_samples(conn, p, log) if set(metrics) & {"avg_review", "low_score_rate"} else {}
                            for conn, p, log in zip(conns, current_plans, statements)]
             by_key = [{canonical(r.get("entity_id", "all")): r for r in result} for result in results]
-            memberships = {m: compare_members(conns, current_plans, m, statements, emit, role, order_sets) for m in metrics if m in {"sales", "payment_amount", "order_count"}}
+            memberships = {m: compare_members(conns, current_plans, m, statements, emit, role, order_sets, contexts) for m in metrics if m in {"sales", "freight", "payment_amount", "order_count"}}
             for key in sorted(by_key[0].keys() | by_key[1].keys()):
                 a, b = by_key[0].get(key), by_key[1].get(key)
                 entity = (a or b).get("entity_id", "all")

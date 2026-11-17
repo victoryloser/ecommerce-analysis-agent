@@ -3,7 +3,8 @@ from app.source import FOREIGN_KEYS, PRIMARY_KEYS, SCHEMA
 
 DIMENSIONS = ["total", "month", "category", "seller", "delivery_status", "customer_state"]
 COMPARISON_METRICS = {
-    "sales": {"key": ["order_id", "order_item_id", "entity_id"], "bridge": "共同明细修订＋进入金额－退出金额", "additive_groups": True},
+    "freight": {"key": ["order_id", "order_item_id", "entity_id"], "bridge": "共同明细修订＋业务进入－业务退出＋金额资格恢复－金额资格退出", "additive_groups": True},
+    "sales": {"key": ["order_id", "order_item_id", "entity_id"], "bridge": "共同明细修订＋业务进入－业务退出＋金额资格恢复－金额资格退出", "additive_groups": True},
     "payment_amount": {"key": ["order_id"], "bridge": "整单完整支付额；不分摊品类/商家", "additive_groups": True},
     "order_count": {"key": ["order_id", "entity_id"], "bridge": "分组内去重入选集合", "additive_groups": False},
     "repeat_customers": {"key": ["customer_unique_id"], "bridge": "两侧重新判定复购资格", "additive_groups": False},
@@ -12,6 +13,7 @@ COMPARISON_METRICS = {
     "low_score_rate": {"key": ["order_id", "entity_id"], "bridge": "两侧重算低分订单数与有评价样本", "additive_groups": False},
 }
 EXPRESSIONS = {
+    "freight": "有效明细 freight_value 求和；完整金额要求金额成分和筛选归属已确认",
     "sales": "完整金额仅在金额成分及筛选归属已确认时计算；已确认明细 price 单独求和",
     "order_count": "分组内确定匹配 order_id 去重；有未知归属时完整订单数为 NULL",
     "payment_amount": "支付先按订单汇总；缺整单记录、未知金额或归属时完整金额为 NULL，已确认小计单列",
@@ -21,7 +23,8 @@ EXPRESSIONS = {
     "repeat_customers": "COUNT(*) FILTER (WHERE n>=2)",
 }
 METRIC_DETAILS = {
-    "sales": {"aliases": ["商品销售额", "商品价款", "销售额"], "dependencies": ["order_items.price"], "grain": "订单—目标明细维度", "unit": "元", "denominator": None, "missing": "确定无匹配为0；金额或归属未知时完整值NULL，另报已确认小计；不含运费"},
+    "freight": {"aliases": ["运费", "运费金额"], "dependencies": ["order_items.freight_value"], "grain": "订单—目标明细维度", "unit": "元", "denominator": None, "missing": "无匹配为0；运费或归属未知时完整值NULL；与商品额分别报告"},
+    "sales": {"aliases": ["商品额", "商品销售额", "商品价款", "销售额"], "dependencies": ["order_items.price"], "grain": "订单—目标明细维度", "unit": "元", "denominator": None, "missing": "确定无匹配为0；金额或归属未知时完整值NULL，另报已确认小计；不含运费"},
     "order_count": {"aliases": ["订单数", "已送达订单数"], "dependencies": ["orders.order_id"], "grain": "分组内去重订单", "unit": "笔", "denominator": None, "missing": "无订单为0"},
     "delay_rate": {"aliases": ["延迟率", "晚到比例"], "dependencies": ["orders.order_id", "orders.delivered_at", "orders.estimated_delivery_at"], "grain": "订单—目标维度", "unit": "比例", "denominator": "分组内已送达订单数", "missing": "履约时间缺失时该组比例为NULL，并报告缺失数"},
     "avg_review": {"aliases": ["平均评分", "平均评价"], "dependencies": ["order_reviews.review_score"], "grain": "有评价的已送达订单", "unit": "分", "denominator": "有评价订单数", "missing": "未评价不记0；一单多评价必须先明确口径"},
@@ -51,13 +54,23 @@ FIELD_MEANINGS = {
 }
 
 
-def metric_detail(metric_id: str) -> dict:
+def metric_detail(metric_id: str, context=None) -> dict:
     dimensions = ["total", "month", "customer_state"] if metric_id == "repeat_customers" else [d for d in DIMENSIONS if d not in {"seller", "category"}] if metric_id == "payment_amount" else DIMENSIONS
-    return {"id": metric_id, **METRIC_DETAILS[metric_id], "expression": EXPRESSIONS[metric_id],
+    result = {"id": metric_id, **METRIC_DETAILS[metric_id], "expression": EXPRESSIONS[metric_id],
             "required_filter": {"orders.order_status": "delivered"}, "time_field": "orders.purchase_at",
             "dimensions": dimensions,
             "joint_groups": [["category", "seller"], ["month", "category"]] if metric_id not in {"payment_amount", "repeat_customers"} else [],
             "rounding": "金额、评分和展示百分比保留2位，HALF_UP；中间金额DECIMAL"}
+    from app.calculation import LEGACY_CONTEXT
+    context = context or LEGACY_CONTEXT
+    result["rule_version"] = context.rule_version
+    if metric_id in {"sales", "freight"}:
+        result["amount_basis"] = "policy_eligible" if context.excludes_orders else "full_population"
+        if context.excludes_orders:
+            result["dependencies"] = [*result["dependencies"], "quality_issues.candidates"]
+            result["expression"] = "先识别同明细键至少两个不同非空商品价；整单商品额和运费暂不计入，再汇总匹配明细；订单身份保留"
+            result["missing"] = "按规则准入范围可计算；排除数另报，不表示完整总体金额。其他缺失和相关归属未知仍阻断；缺支付不影响本指标"
+    return result
 
 
 def table_detail(table: str) -> dict:
@@ -72,7 +85,7 @@ def required_tables(metric_ids: list[str], dimension: str, filter_fields: list[s
         return {"orders", "order_items", "order_payments"}
     tables = {"orders", "customers"}
     dims = {dimension} if isinstance(dimension, str) else set(dimension)
-    if "sales" in metric_ids or dims & {"seller", "category"} or set(filter_fields) & {"seller_id", "category_id", "product_id", "price", "freight_value", "order_sales", "order_freight"}:
+    if set(metric_ids) & {"sales", "freight"} or dims & {"seller", "category"} or set(filter_fields) & {"seller_id", "category_id", "product_id", "price", "freight_value", "order_sales", "order_freight"}:
         tables.update({"order_items", "products", "categories", "sellers"})
     if "payment_amount" in metric_ids or "payment_amount" in filter_fields:
         tables.add("order_payments")

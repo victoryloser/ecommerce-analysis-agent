@@ -6,7 +6,7 @@ from app.semantic import PlanError, validate_plan
 from app.grouping import dimensions, KEY_COLUMNS
 
 TARGETS = {"auto": "自动细分", "total": "仅当前分组", "month": "月份", "category": "品类", "seller": "商家", "customer_state": "客户省份",
-           "orders": "订单明细", "items": "商品明细", "payments": "支付记录", "reviews": "评价详情"}
+           "orders": "订单明细", "items": "商品明细", "payments": "支付记录", "reviews": "评价详情", "audit_order": "核查整单（商家小计及全部明细）"}
 
 
 def selected_row_index(evidence: dict, displayed_row: list) -> int:

@@ -2,6 +2,7 @@
 from app.models import AnalysisPlan, EntityFilter, Predicate
 from app.semantic import PlanError
 from app.grouping import KEY_COLUMNS
+from app.quality import calculation_determined
 
 
 def reconcile_tasks(previous, plan, tasks):
@@ -48,7 +49,7 @@ def bind_step(step, tasks):
     if step.source_row >= len(indexed):
         return None, "needs_input", "指定分区没有对应结果行，请明确目标组合"
     qualities = [result["quality"][i] for i, _ in indexed] if result.get("quality") else []
-    if any(q and q["completeness"] != "complete" for row in qualities for name, q in row.items() if name in relevant):
+    if any(q and (not calculation_determined(q) or q.get("group_eligibility") == "uncertain") for row in qualities for name, q in row.items() if name in relevant):
         return None, "needs_input", "来源排名含未知候选，无法确定目标；请明确实体"
     rows = [row for _, row in indexed]
     if any("membership_confirmed" in row and row["membership_confirmed"] is not True for row in rows):
@@ -75,6 +76,8 @@ def bind_step(step, tasks):
                "item_where": remove_field(step.item_where, step.bind_field)}
     if step.bind_field == "order_id":
         changes["selected_order_id"] = key
+        if source_plan.get("diagnosis") == "order_candidate":
+            changes.update(audit_seller_id=row["seller_id"], filters=[], order_where=None, item_where=None)
     else:
         changes["filters"] = [f for f in step.filters if f.field != step.bind_field] + [EntityFilter(field=step.bind_field, values=[key])]
     return step.model_copy(update=changes), "pending", ""

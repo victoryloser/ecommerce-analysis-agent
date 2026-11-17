@@ -49,11 +49,18 @@ def present(evidence: dict, metric: str | None = None) -> ResultView:
         return view
     plan = AnalysisPlan.model_validate(evidence["plan"]) if evidence["type"] == "query" else None
     view.headers = [plan_label(c, plan) for c in result.columns] if plan else result.columns
-    view.table = [[cell(c, v, plan) if plan else ("NULL" if v is None else str(v)) for c, v in zip(result.columns, row)] for row in result.rows]
+    view.table = [[cell(c, v, plan, result.ratios[i] if result.ratios else None) if plan else ("NULL" if v is None else str(v)) for c, v in zip(result.columns, row)] for i, row in enumerate(result.rows)]
     if result.quality:
         from app.quality import quality_note
         view.headers.append("数据完整度")
         view.table = [row + [quality_note(q)] for row, q in zip(view.table, result.quality)]
+    if plan and plan.audit_seller_id and not result.quality:
+        visible = (["entity_id", "selected_seller_id", "seller_sales", "order_sales", "order_freight", "payment_amount", "payment_records", "amount_eligible"]
+                   if plan.intent == "diagnose" and plan.diagnosis == "order_audit" else
+                   ["entity_id", "order_item_id", "product_name", "seller_id", "price", "freight_value", "belongs_to_selected_seller", "amount_eligible"])
+        indexes = [result.columns.index(c) for c in visible if c in result.columns]
+        view.headers = [view.headers[i] for i in indexes]
+        view.table = [[row[i] for i in indexes] for row in view.table]
     # CSV 保留原始列名、金额精度和0~1比例；JSON同时保存口径、期间与SQL。
     path = directory / f"{result.query_id}.csv"
     with path.open("w", encoding="utf-8-sig", newline="") as handle:

@@ -8,6 +8,7 @@ import json
 from app.models import AnalysisPlan, QueryResult
 from app.source import read_source
 from app.config import DATA_DIR
+from app.calculation import CalculationContext, LEGACY_RULE
 
 
 def truth_all(values):
@@ -60,7 +61,11 @@ def source_quality(known, count, unknown, membership, affected, missing=0):
 
 
 class SourceOracle:
-    def __init__(self, dataset_id: str, tables=None, *, data_dir=DATA_DIR):
+    def __init__(self, dataset_id: str, tables=None, *, data_dir=DATA_DIR, quality_rule_version=None):
+        manifest_path = data_dir / f"{dataset_id}.manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+        self.context = CalculationContext(quality_rule_version or manifest.get("quality_rule_version") or LEGACY_RULE)
+        self.excluded_orders = set()
         if tables is None:
             from app.semantic import load_manifest
             from app.snapshots import read_retained
@@ -104,6 +109,8 @@ class SourceOracle:
                     self.payments[oid] = prior + record["payment_value"] if prior is not None and record["payment_value"] is not None else None
                     self.payment_rows[oid] += 1
             for (oid, _), candidates in variants.items():
+                if table == "order_items" and len({r["price"] for r in candidates if r["price"] is not None}) >= 2:
+                    self.excluded_orders.add(oid)
                 if len({tuple(r.items()) for r in candidates}) < len(candidates):
                     self.quality_events.append((oid, "exact_duplicate"))
                 for field in amounts:
@@ -179,6 +186,9 @@ class SourceOracle:
                     rows.append({"entity_id": review["review_id"], "entity_name": review["review_id"], "order_id": oid,
                         "review_score": int(review["review_score"]), "review_title": review["review_title"] or None, "review_message": review["review_message"] or None,
                         "review_created_at": timestamp(review["review_created_at"]), "membership_confirmed": match})
+        if self.context.excludes_orders and plan.detail_level in {"orders", "items"}:
+            for row in rows:
+                row["amount_eligible"] = row["order_id"] not in self.excluded_orders
         return rows
 
     def group_quality(self, plan, records):
@@ -188,13 +198,16 @@ class SourceOracle:
         qualities = {}
         for metric in plan.metric_ids:
             missing = 0
-            if metric == "sales":
-                items = [i for r in confirmed for i in r["items"]]
-                amounts = [i["price"] for i in items if i["match"] is True and i["price"] is not None]
+            if metric in {"sales", "freight"}:
+                field = "price" if metric == "sales" else "freight_value"
+                eligible_records = [r for r in records if not self.context.excludes_orders or r["order_id"] not in self.excluded_orders]
+                eligible_confirmed = [r for r in eligible_records if r["match"] is True]
+                items = [i for r in eligible_confirmed for i in r["items"]]
+                amounts = [i[field] for i in items if i["match"] is True and i[field] is not None]
                 known, count = sum(amounts, Decimal(0)), len(amounts)
-                unknown = sum(i["match"] is True and i["price"] is None for i in items)
-                membership = uncertain + sum(i["match"] is None for i in items)
-                affected = len({r["order_id"] for r in records if r["match"] is None or any(i["price"] is None or i["match"] is None for i in r["items"])})
+                unknown = sum(i["match"] is True and i[field] is None for i in items)
+                membership = len({r["order_id"] for r in eligible_records if r["match"] is None}) + sum(i["match"] is None for i in items)
+                affected = len({r["order_id"] for r in records if r["match"] is None or any(i[field] is None or i["match"] is None for i in r["items"]) or (self.context.excludes_orders and r["order_id"] in self.excluded_orders)})
             elif metric == "payment_amount":
                 payments = [p["payment_value"] for r in confirmed for p in self.payment_details[r["order_id"]]]
                 amounts = [p for p in payments if p is not None]
@@ -218,7 +231,19 @@ class SourceOracle:
                 numerator = sum(r["delivery"] == "delayed" for r in confirmed) if metric == "delay_rate" else sum(scores) if metric == "avg_review" else sum(score <= 2 for score in scores)
                 known = Decimal(numerator)/count if count else None
                 affected = uncertain + unknown
-            qualities[metric] = source_quality(known, count, unknown, membership, affected, missing)
+            q = source_quality(known, count, unknown, membership, affected, missing)
+            q["calculation_status"] = "insufficient_data" if unknown or membership or missing else "undefined" if known is None else "determined"
+            q["group_eligibility"] = "uncertain" if n < plan.min_group_count and uncertain else "confirmed"
+            if metric in {"sales", "freight"} and self.context.excludes_orders:
+                excluded = len({r["order_id"] for r in confirmed if r["order_id"] in self.excluded_orders})
+                candidates = len({r["order_id"] for r in records if r["match"] is None and r["order_id"] in self.excluded_orders})
+                q.update(amount_basis="policy_eligible", policy_eligible_order_count=len({r["order_id"] for r in eligible_confirmed}),
+                         excluded_order_count=excluded, excluded_candidate_order_count=candidates,
+                         population_complete=not (unknown or membership or missing or excluded or candidates))
+                if excluded or candidates:
+                    q["completeness"] = "partial" if count else "unknown"
+                    q["reason_codes"] += ("," if q["reason_codes"] else "") + "order_price_conflict_excluded"
+            qualities[metric] = q
         return qualities
 
     def evaluate(self, plan: AnalysisPlan, *, with_quality=False) -> list[dict]:
@@ -299,7 +324,7 @@ class SourceOracle:
                     row.update({k: v for k, v in (c or p).items() if k in {"month", "category_id", "category_name", "seller_id", "seller_name"}})
                 row["__quality"] = {}
                 for metric in plan.metric_ids:
-                    absent = 0 if metric in {"sales", "order_count", "payment_amount", "repeat_customers"} else None
+                    absent = 0 if metric in {"sales", "freight", "order_count", "payment_amount", "repeat_customers"} else None
                     cv, pv = c[metric] if c else absent, p[metric] if p else absent
                     for role, side in (("current", c), ("previous", p)):
                         row["__quality"][metric+"_"+role] = side["__quality"][metric] if side else source_quality(absent, 0, 0, 0, 0)
@@ -307,6 +332,9 @@ class SourceOracle:
                     row.update({metric+"_current": cv, metric+"_previous": pv, metric+"_change": delta,
                                 metric+"_rate": delta/pv if delta is not None and pv else None})
                 if plan.min_group_count > 1:
+                    confirmed = all(side is not None and side["__quality"]["order_count"]["known_value"] >= plan.min_group_count for side in (c, p))
+                    for q in row["__quality"].values():
+                        q["group_eligibility"] = "confirmed" if confirmed else "uncertain"
                     row.update(current_orders=c["order_count"] if c else 0, previous_orders=p["order_count"] if p else 0)
                 rows.append(row)
             if plan.intent == "contribution":
@@ -332,8 +360,8 @@ class SourceOracle:
                 keep = set()
                 for partition in partitions.values():
                     for index, row in enumerate(partition):
-                        rank = 1+sum((other[metric] or 0)*sign < (row[metric] or 0)*sign for other in partition) if all(r[metric] is not None for r in partition) else None
-                        if rank is None or rank <= plan.top_n:
+                        rank = 1+sum((other[metric] or 0)*sign < (row[metric] or 0)*sign for other in partition) if all(r[metric] is not None and all(q.get("group_eligibility") != "uncertain" for q in r["__quality"].values()) for r in partition) else None
+                        if plan.limit_mode == "all" or rank is None or rank <= plan.top_n:
                             keep.add(row["entity_id"])
                 rows = [r for r in rows if r["entity_id"] in keep]
             return rows
@@ -444,14 +472,21 @@ class SourceOracle:
                 uncertain_customers = Counter(r["customer"] for r in uncertain)
                 unresolved = any(confirmed_customers[c] < 2 <= confirmed_customers[c]+n for c, n in uncertain_customers.items())
                 values["repeat_customers"] = None if unresolved else sum(n >= 2 for n in confirmed_customers.values())
+            quality = self.group_quality(plan, all_records)
+            for metric in plan.metric_ids:
+                if metric in {"sales", "freight"}:
+                    q = quality[metric]
+                    values[metric] = q["known_value"] if q["calculation_status"] == "determined" else None
             if plan.intent == "rank":
                 metric = plan.metric_ids[0]
-                if values[metric] is None and (bool(uncertain) or metric in {"sales", "payment_amount", "repeat_customers"} or (metric == "delay_rate" and missing > 0)):
+                if count < plan.min_group_count and uncertain:
+                    rank_uncertain.add(group_fields[entity]["month" if plan.rank_within == "month" else plan.rank_within+"_id"] if plan.rank_within else None)
+                if values[metric] is None and (bool(uncertain) or metric in {"sales", "freight", "payment_amount", "repeat_customers"} or (metric == "delay_rate" and missing > 0)):
                     rank_uncertain.add(group_fields[entity]["month" if plan.rank_within == "month" else plan.rank_within+"_id"] if plan.rank_within else None)
             row = {"entity_id": entity, "entity_name": name} if dims else {}
             if plan.group_by:
                 row.update(group_fields[entity])
-            row["__quality"] = self.group_quality(plan, all_records)
+            row["__quality"] = quality
             row.update({m: values[m] for m in plan.metric_ids})
             if "delay_rate" in plan.metric_ids:
                 row.update(sample_orders=count, delayed_orders=delayed, missing_timing_orders=missing)
@@ -489,7 +524,10 @@ def check_rows(result: QueryResult, expected: list[dict]) -> None:
                 for field, value in quality.items():
                     observed = observed_quality[metric][field]
                     if field == "known_value" and value is not None:
-                        assert observed is not None and isclose(float(observed), float(value), rel_tol=1e-12, abs_tol=1e-12), f"{metric}已确认值不一致"
+                        if metric.startswith(("sales", "freight", "payment_amount")) or isinstance(value, int):
+                            assert observed is not None and Decimal(str(observed)) == Decimal(str(value)), f"{metric}已确认值不一致"
+                        else:
+                            assert observed is not None and isclose(float(observed), float(value), rel_tol=1e-12, abs_tol=1e-12), f"{metric}已确认值不一致"
                     else:
                         assert observed == value, f"{metric}.{field}: {observed} != {value}"
             wanted = {k: v for k, v in wanted.items() if k != "__quality"}
@@ -498,9 +536,11 @@ def check_rows(result: QueryResult, expected: list[dict]) -> None:
             observed = actual[key]
             if isinstance(value, Decimal):
                 assert observed is not None, f"{key}: 期望{value}，实际NULL"
-                if key in {"sales", "payment_amount", "current_value", "previous_value", "absolute_change"} and value.as_tuple().exponent >= -2:
+                if (key in {"current_value", "previous_value", "absolute_change"} or key.removesuffix("_current").removesuffix("_previous").removesuffix("_change") in {"sales", "freight", "payment_amount"}) and value.as_tuple().exponent >= -2:
                     assert Decimal(str(observed)) == value, f"{key}: {observed} != {value}"
                 else:
                     assert isclose(float(observed), float(value), rel_tol=1e-12, abs_tol=1e-12), f"{key}: {observed} != {value}"
+            elif isinstance(value, float):
+                assert observed is not None and isclose(float(observed), value, rel_tol=1e-12, abs_tol=1e-12), f"{key}: {observed} != {value}"
             else:
                 assert observed == value, f"{key}: {observed} != {value}"

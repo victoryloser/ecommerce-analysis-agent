@@ -34,7 +34,7 @@ def expand_periods(plan, manifest):
     return plan.model_copy(update=changes)
 
 
-def apply_update(plan: AnalysisPlan, update: PlanUpdate, manifest: dict, tasks=None) -> AnalysisPlan:
+def apply_update(plan: AnalysisPlan, update: PlanUpdate, manifest: dict, tasks=None, *, finalize=True) -> AnalysisPlan:
     if plan.intent == "workflow":
         if update.target_step is None or update.target_step > len(plan.steps):
             raise PlanError("请指定要修改的工作流步骤")
@@ -52,7 +52,7 @@ def apply_update(plan: AnalysisPlan, update: PlanUpdate, manifest: dict, tasks=N
                 step, _, reason = bind_step(step, tasks)
                 if step is None:
                     raise PlanError(reason)
-        steps[index] = apply_update(step, update, manifest)
+        steps[index] = apply_update(step, update, manifest, finalize=finalize)
         return plan.model_copy(update={"steps": steps})
     field = update.field
     changes = {}
@@ -85,12 +85,21 @@ def apply_update(plan: AnalysisPlan, update: PlanUpdate, manifest: dict, tasks=N
         if update.operation == "set" and len(update.values) != 1:
             raise PlanError(f"{field} 需要一个值")
         changes[field] = update.values[0] if update.operation == "set" else None
-    elif field in {"dimension", "metric_ids", "order_statuses", "time_field", "contribution_direction"}:
+    elif field in {"dimension", "metric_ids", "order_statuses", "time_field", "contribution_direction", "intent", "top_n", "min_group_count", "detail_level", "limit_mode"}:
         if update.operation != "set" or not update.values:
             raise PlanError(f"{field} 需要提供替换值")
         changes[field] = update.values if field in {"metric_ids", "order_statuses"} else update.values[0]
         if field == "dimension":
             changes.update(group_by=None, rank_within=None, contribution_within=None)
+        if field == "intent":
+            if update.values[0] not in {"aggregate", "rank", "compare", "contribution", "details", "diagnose"}:
+                raise PlanError("结果意图只能选择已支持的分析类型")
+            if update.values[0] not in {"compare", "contribution"}:
+                changes.update(comparison_range=None, comparison_mode="none", contribution_within=None)
+            if update.values[0] != "rank":
+                changes["rank_within"] = None
+            if update.values[0] != "contribution":
+                changes["limit_mode"] = "top_n"
     elif field:
         changes = {"filters": [f for f in plan.filters if f.field != field],
                    "order_where": remove_field(plan.order_where, field),
@@ -108,8 +117,37 @@ def apply_update(plan: AnalysisPlan, update: PlanUpdate, manifest: dict, tasks=N
             changes[target] = Predicate(children=[old, node]) if old else node
     else:
         raise PlanError("条件更新缺少字段")
-    result = AnalysisPlan.model_validate(plan.model_copy(update=changes).model_dump())
-    return expand_periods(result, manifest)
+    result = plan.model_copy(update=changes)
+    return expand_periods(AnalysisPlan.model_validate(result.model_dump()), manifest) if finalize else result
+
+
+def apply_updates(plan, updates, manifest, tasks=None, focus_step=None):
+    """Build one final candidate; no session mutations or queries in the batch."""
+    updates = [updates] if isinstance(updates, PlanUpdate) else list(updates)
+    if len(updates) > 16:
+        raise PlanError("一轮最多16项条件变更")
+    result = plan.model_copy(deep=True)
+    if plan.intent == "workflow":
+        updates = [u.model_copy(update={"target_step": u.target_step or focus_step}) for u in updates]
+        touched = {u.target_step for u in updates}
+        invalid = set(touched)
+        for i, step in enumerate(plan.steps, 1):
+            if step.source_step in invalid:
+                invalid.add(i)
+        # A changed source must be rebound before applying explicit overrides.
+        for u in updates:
+            if u.target_step is None or u.target_step > len(result.steps):
+                raise PlanError("请指定要修改的工作流步骤")
+            step = result.steps[u.target_step-1]
+            if step.source_step in invalid and u.field != "source_partition":
+                result.steps[u.target_step-1] = step.model_copy(update={
+                    "binding_updates": [*step.binding_updates, u.model_copy(update={"target_step": None})]})
+            else:
+                result = apply_update(result, u, manifest, tasks, finalize=False)
+    else:
+        for u in updates:
+            result = apply_update(result, u, manifest, tasks, finalize=False)
+    return expand_periods(AnalysisPlan.model_validate(result.model_dump()), manifest)
 
 
 def replay_intent(plan, manifest):

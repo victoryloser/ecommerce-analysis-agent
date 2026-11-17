@@ -1,16 +1,21 @@
-from decimal import ROUND_HALF_UP, Decimal
 from datetime import timedelta
 
 from app.models import AnalysisPlan, QueryResult
 from app.semantic import METRICS, RELATIONSHIPS
+from app.result_math import display_decimal
 
 LABELS = {
+    "seller_sales": "选中商家商品小计（元）", "selected_seller_id": "选中商家ID",
+    "payment_records": "支付记录数", "belongs_to_selected_seller": "属于选中商家",
+    "issue_type": "问题类型", "issue_key_count": "问题业务键数", "affected_orders": "涉及订单数",
+    "uncertain_orders": "待确认订单数", "extra_duplicate_rows": "重复多余行数", "candidate_count": "不同候选数",
+    "business_key": "业务键", "source_rows": "来源逻辑记录序号", "candidates": "不同候选（非逐行对应）",
     "month": "月份", "category_name": "品类", "parent_change": "品类内净变化额（元）",
     "parent_contribution_rate": "品类内净变化贡献率",
     "membership_confirmed": "已确认符合筛选", "order_sales_known": "已确认商品金额", "order_sales_unknown": "未知商品金额成分数",
     "order_freight_known": "已确认运费", "order_freight_unknown": "未知运费成分数", "payment_known": "已确认支付金额",
     "payment_unknown": "未知支付金额成分数", "payment_missing": "整单缺支付记录",
-    "entity_id": "分组ID", "entity_name": "分组", "sales": "商品销售额（元）", "order_count": "已送达订单数",
+    "entity_id": "分组ID", "entity_name": "分组", "sales": "商品销售额（元）", "freight": "运费（元）", "amount_eligible": "计入正式商品额与运费", "order_count": "已送达订单数",
     "payment_amount": "支付金额（元）", "delay_rate": "延迟率", "avg_review": "平均评分", "low_score_rate": "低分率",
     "repeat_customers": "复购自然客户数", "sample_orders": "已送达订单数", "delayed_orders": "延迟订单数",
     "missing_timing_orders": "时间缺失订单数", "reviewed_orders": "有评价订单数", "rank_no": "名次",
@@ -58,11 +63,18 @@ def plan_label(column: str, plan: AnalysisPlan) -> str:
     return text.replace("已送达", "所选状态") if plan.order_statuses != ["delivered"] else text
 
 
-def cell(column: str, value, plan: AnalysisPlan) -> str:
+def cell(column: str, value, plan: AnalysisPlan, ratios=None) -> str:
     if value is None:
+        status = (ratios or {}).get(column, {}).get("calculation_status")
+        if status == "undefined":
+            return "未定义（分母为0）"
+        if status == "insufficient_data":
+            return "数据不足"
         return "不可计算/无数据"
     if column == "order_status":
         return STATUS_LABELS.get(value, value)
+    if column in {"membership_confirmed", "amount_eligible", "belongs_to_selected_seller", "payment_missing"}:
+        return "是" if value else "否"
     metric = plan.metric_ids[0] if column in {"current_value", "previous_value", "absolute_change"} and plan.metric_ids else column
     for suffix in ("_current", "_previous", "_change"):
         if metric.endswith(suffix):
@@ -71,9 +83,9 @@ def cell(column: str, value, plan: AnalysisPlan) -> str:
         metric = "change_rate"
     if metric in {"delay_rate", "low_score_rate", "change_rate"}:
         suffix = " 个百分点" if column == "absolute_change" or column.endswith("_change") else "%"
-        return str((Decimal(str(value)) * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)) + suffix
-    if metric in {"sales", "payment_amount", "avg_review", "inflated_sales", "inflated_payment", "order_sales", "order_freight", "difference", "price", "freight_value", "payment_value", "total_change", "parent_change"}:
-        return str(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        return display_decimal(value, 100) + suffix
+    if metric in {"sales", "seller_sales", "freight", "payment_amount", "avg_review", "inflated_sales", "inflated_payment", "order_sales", "order_freight", "difference", "price", "freight_value", "payment_value", "total_change", "parent_change"}:
+        return display_decimal(value)
     return str(value).replace("|", "\\|").replace("\n", " ")
 
 
@@ -113,7 +125,25 @@ def conclusion(plan: AnalysisPlan, result: QueryResult) -> str:
 
 
 def answer(plan: AnalysisPlan, result: QueryResult, manifest: dict) -> str:
-    text = _answer(plan, result, manifest)
+    from app.business_answers import inspection_answer, comparison_answer, audit_items_answer, LIMITATIONS
+    if plan.intent == "diagnose" and plan.diagnosis in {"quality_summary", "quality_rows", "order_candidate", "order_audit"}:
+        text = inspection_answer(plan, result, manifest)
+    elif plan.intent == "compare" and plan.dimension == "total" and not plan.group_by and len(plan.metric_ids) > 1 and result.status == "ok":
+        text = comparison_answer(plan, result, manifest)
+    elif plan.intent == "details" and plan.detail_level == "items" and plan.audit_seller_id and result.status == "ok":
+        text = audit_items_answer(plan, result)
+    else:
+        text = _answer(plan, result, manifest)
+    text += "".join("\n\n" + LIMITATIONS[k] for k in dict.fromkeys(plan.limitations))
+    from app.calculation import CalculationContext
+    if CalculationContext.from_manifest(manifest).excludes_orders and set(plan.metric_ids) & {"sales", "freight"}:
+        text += "\n\n金额依据：按正式规则准入的明细计算商品额和运费；价格冲突订单整单暂不计入金额，订单数及已确认归属保留。排名和环比均针对该准入范围。"
+    undefined = {name for row in result.ratios for name, q in row.items() if q["calculation_status"] == "undefined"}
+    insufficient = {name for row in result.ratios for name, q in row.items() if q["calculation_status"] == "insufficient_data"}
+    if undefined:
+        text += "\n\n" + "、".join(label(name) for name in sorted(undefined)) + "：分母为0，数学上未定义。"
+    if insufficient:
+        text += "\n\n" + "、".join(label(name) for name in sorted(insufficient)) + "：相关金额或范围未确认，数据不足。"
     from app.quality import quality_note
     notes = [f"第{index+1}组：{quality_note(q)}" for index, q in enumerate(result.quality) if quality_note(q) != "完整"]
     return text + ("\n\n数据完整度：\n\n" + "\n\n".join(notes[:30]) if notes else "")
@@ -132,7 +162,7 @@ def _answer(plan: AnalysisPlan, result: QueryResult, manifest: dict) -> str:
     columns = result.columns
     table = "| " + " | ".join(LABELS[c] for c in columns) + " |\n"
     table += "| " + " | ".join("---" for _ in columns) + " |\n"
-    table += "\n".join("| " + " | ".join(cell(c, v, plan) for c, v in zip(columns, row)) + " |" for row in result.rows)
+    table += "\n".join("| " + " | ".join(cell(c, v, plan, result.ratios[i] if result.ratios else None) for c, v in zip(columns, row)) + " |" for i, row in enumerate(result.rows))
     notes = [metric_description(m) for m in plan.metric_ids]
     if plan.intent == "join_example":
         notes = ["按订单ID选取期间内第一笔同时具有多条商品明细和多条支付记录的已送达订单，放大金额由实际行数和订单合计计算。"]
@@ -168,11 +198,12 @@ def advanced_answer(plan: AnalysisPlan, result: QueryResult, manifest: dict) -> 
         metric = plan.metric_ids[0]
         if first["total_change"] is not None:
             direction = "升序，优先查看下降驱动" if plan.contribution_direction == "decrease" else "降序，优先查看增长驱动"
-            notes.append(f"按变化额{direction}；当前完整分析范围净变化 {cell('total_change', first['total_change'], plan)} 元。")
+            notes.append(f"按变化额{direction}；当前分析范围净变化 {cell('total_change', first['total_change'], plan)} 元。")
         else:
             notes.append("部分分组变化未知，不能确认总体贡献排名和净增长贡献率。完整分组仍展示变化额。")
         notes.append("贡献率=分组变化额/整体净变化额；下降可为负，正向贡献可超过100%；净变化为0时不可计算。")
-        notes.append(f"展示前{plan.top_n}名及并列，分母使用全部符合业务筛选的组合，不受订单展示门槛、Top N或分页影响。")
+        selection = "展示全部分组" if plan.limit_mode == "all" else f"展示前{plan.top_n}名及并列"
+        notes.append(f"{selection}，分母使用全部符合业务筛选的组合，不受订单展示门槛、Top N或分页影响。")
         if plan.contribution_within:
             notes.append("另列品类内贡献：组合变化额/所在品类净变化额；该品类变化为零或未知时比例不可计算。")
     elif plan.intent == "compare":
@@ -194,6 +225,6 @@ def advanced_answer(plan: AnalysisPlan, result: QueryResult, manifest: dict) -> 
     if plan.order_where or plan.item_where:
         notes.append("订单条件按整单金额、状态或评分筛选，商品条件按商品明细筛选。")
     table = "| " + " | ".join(plan_label(c, plan) for c in result.columns) + " |\n| " + " | ".join("---" for _ in result.columns) + " |\n"
-    table += "\n".join("| " + " | ".join(cell(c, v, plan) for c, v in zip(result.columns, row)) + " |" for row in result.rows[:30])
+    table += "\n".join("| " + " | ".join(cell(c, v, plan, result.ratios[i] if result.ratios else None) for c, v in zip(result.columns, row)) + " |" for i, row in enumerate(result.rows[:30]))
     notes.append(f"本页共{len(result.rows)}条，聊天中最多展示30条；完整结果可在下方表格查看或导出。")
     return text + "\n\n" + "\n\n".join(notes) + "\n\n" + table
