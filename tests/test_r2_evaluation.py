@@ -266,3 +266,32 @@ def test_runner_two_replicates_isolate_sessions(synthetic, isolated_runs, tmp_pa
     assert len(set(a["session_id"] for a in report["attempts"])) == 2
     assert report["summary"]["first_attempt_chains_passed"] == 2
     assert report["scope"] == "subset"
+
+
+def test_runner_accepts_unchanged_same_session_workflow_evidence(synthetic, isolated_runs, tmp_path):
+    from app.models import PlanUpdate
+    executor, oracle = synthetic
+    third = contract(executor.manifest, "B3").model_copy(update={"intent": "update", "limitations": ["profit"],
+        "updates": [PlanUpdate(operation="set", field="intent", values=["aggregate"]),
+                    PlanUpdate(operation="set", field="metric_ids", values=["order_count", "sales", "freight"]),
+                    PlanUpdate(operation="set", field="category_id", values=["electronics"])]})
+    plans = [scripted_plan(executor.manifest, c) for c in ("B1", "B2")]+[third, scripted_plan(executor.manifest, "B4")]
+    cases = [Round2Case(c, "synthetic "+c) for c in CASE_IDS]
+    report = evaluate_round2(Scripted(*plans), {"D1": executor}, cases, tmp_path/"reuse", selection=["D1:B"], mode="fixed-planner")
+    assert report["summary"]["passed"] == 4, [(a["case_id"], a["checks"]) for a in report["attempts"]]
+    previous, current = report["attempts"][1:3]
+    assert current["query_calls"] == 1
+    evidence = current["evidence_records"][0]
+    assert evidence["steps"][1]["turn_id"] == previous["turn_id"]
+    def lineage(prior):
+        verdict = judge("B3", executor.manifest, oracle, evidence, current["answer_text"],
+                        turn_id=current["turn_id"], prior_records=prior)
+        return next(c["passed"] for c in verdict["checks"] if c["name"] == "lineage")
+    assert lineage(previous["evidence_records"])
+    assert not lineage([])
+    foreign = deepcopy(previous["evidence_records"])
+    for record in foreign:
+        record["session_id"] = "another-session"
+    assert not lineage(foreign)
+    evidence["steps"][1]["question"] = "changed after reuse"
+    assert not lineage(previous["evidence_records"])

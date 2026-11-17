@@ -95,7 +95,9 @@ def main(provider_factory=None):
                         if case.case_id.endswith("1"):
                             assert entry["session_id"] != prior_session, "换链未新建会话"
                         prior_session = entry["session_id"]
-                        entry["verdict"] = judge(case.case_id, executors[role].manifest, oracles[role], entry["evidence"], entry["answer_text"], turn_id=entry["turn_id"])
+                        prior_records = [r for t in report["turns"][:-1] if t["session_id"] == entry["session_id"]
+                                         for r in [t["evidence"], *t["evidence"].get("steps", [])] if r.get("record_id")]
+                        entry["verdict"] = judge(case.case_id, executors[role].manifest, oracles[role], entry["evidence"], entry["answer_text"], turn_id=entry["turn_id"], prior_records=prior_records)
                         report["scenes"][-1].update(turn_id=entry["turn_id"], record_id=entry["evidence"].get("record_id"))
                         page.get_by_text("本轮查询结果", exact=True).scroll_into_view_if_needed()
                         page.screenshot(path=str(args.output/(role+"-"+case.case_id+".png")))

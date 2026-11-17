@@ -169,7 +169,7 @@ def check_answer_values(text, plan, expected):
             assert found, f"实际回答缺少或错误：{identity or '总体'} {label(field)}={wanted}"
 
 
-def judge(case_id, manifest, oracle, evidence, answer_text, *, turn_id=None, reused_ids=()):
+def judge(case_id, manifest, oracle, evidence, answer_text, *, turn_id=None, prior_records=()):
     checks = []
     def check(name, action, refs=()):
         try:
@@ -183,6 +183,7 @@ def judge(case_id, manifest, oracle, evidence, answer_text, *, turn_id=None, reu
     records = evidence.get("steps", [evidence])
     records = [r for r in records if r and r.get("result")]
     pairs = [(AnalysisPlan.model_validate(r["plan"]), QueryResult.model_validate(r["result"]), r) for r in records]
+    prior = {r["record_id"]: r for r in prior_records if r.get("session_id") == evidence.get("session_id")}
     check("execution", lambda: require(bool(pairs) and all(t["status"] in {"completed", "unsupported"} for t in evidence.get("tasks", [])), "任务未全部完成"))
     from app.calculation import ROUND2_RULE
     check("amount_rule", lambda: require(manifest.get("quality_rule_version") == ROUND2_RULE, "快照未绑定正式金额规则"))
@@ -190,7 +191,7 @@ def judge(case_id, manifest, oracle, evidence, answer_text, *, turn_id=None, reu
         r.get("database_sha256") == manifest["database_sha256"] and
         r.get("metadata_sha256") == manifest["metadata_sha256"] and
         r.get("quality_rule_version") == manifest.get("quality_rule_version") and
-        (turn_id is None or r.get("turn_id") == turn_id or r.get("record_id") in reused_ids)
+        (turn_id is None or r.get("turn_id") == turn_id or r == prior.get(r.get("record_id")))
         for _, _, r in pairs), "结果来自其他快照或回合"))
     for plan, result, record in pairs:
         def numeric(plan=plan, result=result):

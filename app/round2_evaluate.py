@@ -186,8 +186,9 @@ def evaluate_round2(provider, executors, cases, output, *, selection=(), repeats
                 records = [turn.evidence, *turn.evidence.get("steps", [])]
                 attempt["evidence_records"] = [r for r in records if r.get("record_id")]
                 attempt["answer_text"] = turn.text
-                reused = {r["record_id"] for a in previous for r in a["evidence_records"]} if parent else set()
-                verdict = judge(slot["case_id"], manifest, oracles[role], turn.evidence, turn.text, turn_id=trace.turn_id, reused_ids=reused)
+                prior_records = [r for a in report["attempts"] if a is not attempt and a["session_id"] == session.session_id
+                                 for r in a["evidence_records"]]
+                verdict = judge(slot["case_id"], manifest, oracles[role], turn.evidence, turn.text, turn_id=trace.turn_id, prior_records=prior_records)
                 attempt.update(status="passed" if verdict["passed"] else "product_failure", checks=verdict["checks"])
                 if any((r.get("result") or {}).get("status") == "timeout" for r in records):
                     attempt["status"] = "infrastructure_failure"
