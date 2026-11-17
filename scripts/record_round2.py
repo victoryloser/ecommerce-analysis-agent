@@ -91,6 +91,7 @@ def main(provider_factory=None):
                             page.wait_for_timeout(200)
                         expect(field).to_have_value("", timeout=20000)
                         entry = report["turns"][-1]
+                        assert entry["question"] == case.question, "输入的问题被界面回调改写"
                         assert entry["evidence"]["dataset_id"] == mapping[role], "旧快照结果残留"
                         if case.case_id.endswith("1"):
                             assert entry["session_id"] != prior_session, "换链未新建会话"

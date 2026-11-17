@@ -448,8 +448,8 @@ def build_ui():
             upload_origin = gr.Radio(choices=[("自行上传", "uploaded"), ("正式复赛材料", "official"), ("练习数据", "practice"), ("本地构造", "constructed")], value="uploaded", label="材料来源声明")
             import_files = gr.Button("校验映射并导入")
             upload_status = gr.Markdown()
-        questions.change(lambda value: value, questions, message)
-        slot_choice.change(lambda value: value, slot_choice, message)
+        questions.input(lambda value: value, questions, message)
+        slot_choice.input(lambda value: value, slot_choice, message)
         result_outputs = [result_table, bar, line, download_csv, download_json, slot_choice]
         sql_outputs = [sql_editor, sql_parameters, sql_scope, sql_note]
         dataset.change(switch_dataset, [dataset, session], [chat, session, evidence, questions, *result_outputs, saved, *sql_outputs], concurrency_id="analysis")
