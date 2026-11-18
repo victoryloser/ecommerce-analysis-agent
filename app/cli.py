@@ -9,6 +9,7 @@ from app.session import Session
 from app.session_store import SessionStore
 from app.sql_workspace import SQLWorkspace, sql_answer
 from app.data_upload import registered_datasets
+from app.delivery import is_delivery_request, refresh_delivery
 from app.snapshots import resolve_dataset
 from app.config import DATASETS
 
@@ -38,8 +39,18 @@ def main():
     session = store.load(args.session, executor.manifest) if args.session else Session(args.dataset)
     print(f"会话ID：{session.session_id}（自动保存）；/drill 行号 维度、/back、/sql SELECT…、/raw SELECT…")
     print("模型请求失败后用 /retry 重发原问题。已开始执行的查询可用 /continue 继续。")
+    print("新版交付后，输入“数据更新了”或 /sync 可同步并按当前条件重算。")
     failed_question = None
     while (question := input("\n问题> ").strip()) != "/exit":
+        if is_delivery_request(question):
+            updated, text = refresh_delivery(agent, session, question)
+            if updated.dataset_id != session.dataset_id:
+                failed_question = None
+            session = updated
+            print(text)
+            if session.last_evidence.get("record_id"):
+                print(f"\n当前结果依据：runs/{session.dataset_id}/{session.last_evidence['record_id']}.json")
+            continue
         if question.startswith("/drill "):
             _, row, dimension = question.split()
             turn = agent.drill(session, int(row) - 1, dimension)
@@ -89,7 +100,7 @@ def main():
             failed_question = None
         print(turn.text)
         if "record_id" in turn.evidence:
-            print(f"\n证据：runs/{args.dataset}/{turn.evidence['record_id']}.json")
+            print(f"\n证据：runs/{session.dataset_id}/{turn.evidence['record_id']}.json")
 
 
 if __name__ == "__main__":

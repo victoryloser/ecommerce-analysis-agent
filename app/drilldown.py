@@ -42,6 +42,10 @@ def group_scope(parent: AnalysisPlan, selected: dict) -> dict:
             # 保留原布尔条件，将选中分组作为额外 AND 约束。
             if value is not None and dim in {"category", "seller", "customer_state"}:
                 filters.append(EntityFilter(field=field, values=[value]))
+                if dim == "customer_state":
+                    # A selected known bucket excludes missing provinces, which have their own bucket.
+                    condition = Predicate(field=field, operator="not_null")
+                    order_where = Predicate(children=[order_where, condition]) if order_where else condition
             else:
                 condition = Predicate(field=field, operator="is_null" if value is None else "eq", values=[] if value is None else [value])
                 if dim in {"category", "seller"}:

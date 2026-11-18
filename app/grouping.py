@@ -3,7 +3,10 @@
 KEY_COLUMNS = {"month": "month", "category": "category_id", "seller": "seller_id",
                "customer_state": "customer_state", "delivery_status": "delivery_status"}
 NAME_COLUMNS = {"category": "category_name", "seller": "seller_name"}
-JOINT_GROUPS = (("category", "seller"), ("month", "category"))
+DIMENSION_LABELS = {"category": "品类", "seller": "商家", "month": "月份", "customer_state": "客户省份"}
+REGIONAL_GROUP = ("category", "customer_state")
+REGIONAL_METRICS = {"sales", "freight", "order_count"}
+JOINT_GROUPS = (("category", "seller"), ("month", "category"), REGIONAL_GROUP)
 
 
 def dimensions(plan):

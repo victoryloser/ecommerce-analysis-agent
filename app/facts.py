@@ -98,7 +98,8 @@ def aggregate(plan: AnalysisPlan, context=LEGACY_CONTEXT) -> CompiledQuery:
     entity = ",".join([f"{key} AS entity_id", f"{name} AS entity_name", *joint_projection(plan)])
     match = "o.scope_match AND i.group_match" if grouped_items else "o.scope_match"
     reviews = bool(set(plan.metric_ids) & {"avg_review", "low_score_rate"})
-    ctes.append(f"""facts AS (SELECT o.*,{entity},({match}) AS match_state,
+    order_fields = "o.* EXCLUDE (customer_state)" if plan.group_by and "customer_state" in dims else "o.*"
+    ctes.append(f"""facts AS (SELECT {order_fields},{entity},({match}) AS match_state,
         COALESCE(i.sales_known,0) AS sales_known,COALESCE(i.sales_known_count,0) AS sales_known_count,
         COALESCE(i.sales_unknown,0) AS sales_unknown,COALESCE(i.item_unknown,0) AS item_unknown,
         COALESCE(i.freight_known,0) AS freight_known,COALESCE(i.freight_known_count,0) AS freight_known_count,

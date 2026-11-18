@@ -329,7 +329,7 @@ class SourceOracle:
                 c, p = current.get(key), previous.get(key)
                 row = {"entity_id": key, "entity_name": (c or p)["entity_name"]} if dims else {}
                 if plan.group_by:
-                    row.update({k: v for k, v in (c or p).items() if k in {"month", "category_id", "category_name", "seller_id", "seller_name"}})
+                    row.update({k: v for k, v in (c or p).items() if k in {"month", "category_id", "category_name", "seller_id", "seller_name", "customer_state"}})
                 row["__quality"] = {}
                 for metric in plan.metric_ids:
                     absent = 0 if metric in {"sales", "freight", "order_count", "payment_amount", "repeat_customers"} else None
@@ -385,6 +385,9 @@ class SourceOracle:
         groups = defaultdict(list)
         group_fields = {}
         filters = {f.field: set(f.values) for f in plan.filters}
+        partition_field = plan.rank_within
+        if partition_field in {"category", "seller"}:
+            partition_field += "_id"
         for order in self.orders:
             oid = order["order_id"]
             day = str(order[plan.time_field])[:10]
@@ -418,15 +421,15 @@ class SourceOracle:
             if plan.group_by:
                 for item in items:
                     category = self.products[item["product_id"]]["category_id"]
-                    values = {"category": category, "seller": item["seller_id"], "month": day[:7]}
-                    labels = {"category": self.categories[category], "seller": self.sellers[item["seller_id"]], "month": day[:7]}
+                    values = {"category": category, "seller": item["seller_id"], "month": day[:7], "customer_state": customer["customer_state"]}
+                    labels = {**values, "category": self.categories[category], "seller": self.sellers[item["seller_id"]]}
                     key = json.dumps({d: values[d] for d in dims}, ensure_ascii=False, separators=(",", ":"))
                     name = " / ".join(labels[d] if labels[d] is not None else "未标注" for d in dims)
                     entities[(key, name)].append(item)
                     group_fields[key] = {}
                     for dim in dims:
-                        if dim == "month":
-                            group_fields[key]["month"] = values[dim]
+                        if dim in {"month", "customer_state"}:
+                            group_fields[key][dim] = values[dim]
                         else:
                             group_fields[key][dim+"_id"] = values[dim]
                             group_fields[key][dim+"_name"] = labels[dim]
@@ -488,9 +491,9 @@ class SourceOracle:
             if plan.intent == "rank":
                 metric = plan.metric_ids[0]
                 if count < plan.min_group_count and uncertain:
-                    rank_uncertain.add(group_fields[entity]["month" if plan.rank_within == "month" else plan.rank_within+"_id"] if plan.rank_within else None)
+                    rank_uncertain.add(group_fields[entity][partition_field] if partition_field else None)
                 if values[metric] is None and (bool(uncertain) or metric in {"sales", "freight", "payment_amount", "repeat_customers"} or (metric == "delay_rate" and missing > 0)):
-                    rank_uncertain.add(group_fields[entity]["month" if plan.rank_within == "month" else plan.rank_within+"_id"] if plan.rank_within else None)
+                    rank_uncertain.add(group_fields[entity][partition_field] if partition_field else None)
             row = {"entity_id": entity, "entity_name": name} if dims else {}
             if plan.group_by:
                 row.update(group_fields[entity])
@@ -506,7 +509,7 @@ class SourceOracle:
             rows.sort(key=lambda r: (r[metric] is None, -r[metric] if r[metric] is not None else 0, r["entity_id"]))
             partitions = defaultdict(list)
             for row in rows:
-                partition = row["month" if plan.rank_within == "month" else plan.rank_within+"_id"] if plan.rank_within else None
+                partition = row[partition_field] if partition_field else None
                 partitions[partition].append(row)
             for partition, members in partitions.items():
                 rank = 0

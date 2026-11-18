@@ -19,6 +19,8 @@ from app.sql_workspace import SQLWorkspace, workspace_catalog
 from app.presentation import display_evidence
 from app.charts import numeric_columns, render_charts, CLICK_SCRIPT
 from app.data_upload import registered_datasets, discover, suggest_mapping, import_upload
+from app.delivery import is_delivery_request, refresh_delivery
+from app.review_ui import add_review_panel
 
 
 def example_questions(manifest):
@@ -31,7 +33,8 @@ def example_questions(manifest):
             question = re.sub(r"(?<!\d)(\d{1,2})月", rf"{year}年\1月", question)
         questions.append(question)
     questions = questions or ["全部数据中，已送达订单的商品销售额是多少？", "按月份查看商品销售额和订单量", "按品类查看商品销售额", "查看延迟率最高的商家"]
-    return questions + ["按品类和商家联合列出全期商品销售额及订单数", "全期每个品类分别按商品销售额列出前三商家，保留并列", "按月份和品类查看全期商品销售额趋势"]
+    return questions + ["按品类和商家联合列出全期商品销售额及订单数", "全期每个品类分别按商品销售额列出前三商家，保留并列", "按月份和品类查看全期商品销售额趋势",
+                        "按品类与客户省份联合统计全期商品销售额、运费和订单数"]
 
 
 def build_ui():
@@ -86,17 +89,26 @@ def build_ui():
 
     def submit(question, history, session, dataset_id, practice_context):
         session = current_session(session if session and session.dataset_id == dataset_id else None, dataset_id)
+        if is_delivery_request(question):
+            session, _ = refresh_delivery(agent, session, question)
+            target = session.dataset_id
+            selection = gr.skip()
+            if target != dataset_id:
+                datasets[target] = executors[target].manifest["name"]
+                selection = gr.Dropdown(choices=[(name, key) for key, name in datasets.items()], value=target)
+            return ("", session.transcript, session, session.last_evidence, *result_components(session.last_evidence),
+                    archives(target, session.session_id), selection)
         try:
             provider()
             turn = agent.respond(session, question, practice_context)
         except (httpx.HTTPError, ModelConfigurationError) as error:
             gr.Warning(model_error_message(error))
-            return question, session.transcript, session, gr.skip(), *(gr.skip() for _ in result_outputs), archives(dataset_id, session.session_id)
-        return "", session.transcript, session, turn.evidence, *result_components(turn.evidence), archives(dataset_id, session.session_id)
+            return question, session.transcript, session, gr.skip(), *(gr.skip() for _ in result_outputs), archives(dataset_id, session.session_id), gr.skip()
+        return "", session.transcript, session, turn.evidence, *result_components(turn.evidence), archives(dataset_id, session.session_id), gr.skip()
 
     def switch_dataset(dataset_id, session):
         questions = example_questions(executors[dataset_id].manifest) if dataset_id in executors else []
-        if session and session.dataset_id == dataset_id and session.last_evidence:
+        if session and session.dataset_id == dataset_id:
             return (session.transcript, session, session.last_evidence, gr.Dropdown(choices=questions, value=None),
                     *result_components(session.last_evidence), archives(dataset_id, session.session_id), "SELECT * FROM analysis_result", "[]", "analysis_result", "")
         return ([], Session(dataset_id) if dataset_id in executors else None, {}, gr.Dropdown(choices=questions, value=None),
@@ -324,7 +336,33 @@ def build_ui():
 
     def choose_history(hits, dataset_id, evt: gr.SelectData):
         selected = hits[int(evt.row_value[0])-1]
-        return archives(dataset_id, selected["session_id"])
+        try:
+            record = store.turn_evidence(selected["session_id"], selected["turn_index"], executors[dataset_id].manifest)
+        except ValueError as error:
+            gr.Warning(str(error))
+            record = None
+        steps = [(f"步骤 {i} · {step['question']}", i) for i, step in enumerate(record.get("steps", []), 1)
+                 if step.get("record_id")] if record else []
+        return (archives(dataset_id, selected["session_id"]), record,
+                gr.Dropdown(choices=[("整轮证据", 0), *steps], value=0, visible=bool(steps)),
+                *view_history(record, 0))
+
+    def view_history(record, step):
+        if not record:
+            return ("该回合没有可打开的独立证据，可在上方继续该会话查看原回答。",
+                    gr.Dataframe(visible=False), gr.DownloadButton(value=None, visible=False))
+        selected = record["steps"][step-1] if step else record
+        view = present(selected)
+        from app.business_answers import scope_text
+        text = f"**历史回合 · {selected['created_at'][:16]}**\n\n{selected['question']}"
+        shown = display_evidence(selected)
+        if shown.get("type") == "query":
+            text += "\n\n" + scope_text(AnalysisPlan.model_validate(shown["plan"]))
+        return (text, gr.Dataframe(value={"headers": view.headers, "data": view.table}, visible=bool(view.headers)),
+                gr.DownloadButton(value=view.evidence_file, visible=bool(view.evidence_file)))
+
+    def clear_history_view():
+        return None, gr.Dropdown(visible=False, choices=[], value=None), "", gr.Dataframe(visible=False), gr.DownloadButton(value=None, visible=False)
 
     def apply_scope(session, dataset_id, date_field, statuses, start, end, order_conditions, item_conditions):
         from app.models import PlanUpdate, Predicate, TimeRange
@@ -358,7 +396,7 @@ def build_ui():
             slot_choice = gr.Dropdown(choices=[], value=None, label="选择补充条件后点击分析", visible=False)
             questions = gr.Dropdown(choices=example_questions(initial_manifest) if initial_manifest else [], label="试试这样问", value=None)
             with gr.Row():
-                message = gr.Textbox(label="问题", placeholder="例如：按月份查看商品销售额和订单量", scale=6)
+                message = gr.Textbox(label="问题", placeholder="例如：按月份查看商品销售额和订单量；新版交付后输入“数据更新了”", scale=6)
                 send = gr.Button("分析", variant="primary", scale=1)
                 reset = gr.Button("新建会话", scale=1)
             with gr.Row(visible=False) as drill_controls:
@@ -397,6 +435,7 @@ def build_ui():
             with gr.Accordion("问题原始记录", open=False, visible=False) as quality_source_panel:
                 quality_source = gr.JSON()
             evidence = gr.JSON(visible=False)
+            add_review_panel(gr, agent, datasets, session, evidence)
             with gr.Accordion("高级分析 · SQL", open=False):
                 gr.Markdown("使用 SQL 进一步分析数据。查询上次分析结果时，数据表名为 `analysis_result`。")
                 sql_scope = gr.Radio(choices=[("上次成功分析结果（含完整度）", "analysis_result"), ("规范化业务表", "raw")], value="analysis_result", label="SQL 数据范围")
@@ -447,8 +486,13 @@ def build_ui():
                     history_start = gr.Textbox(label="起始日期（可留空）")
                     history_end = gr.Textbox(label="截止日期（不含，可留空）")
                     history_search = gr.Button("检索历史")
-                history_table = gr.Dataframe(interactive=False, label="点击记录后可在上方恢复对应会话")
+                history_table = gr.Dataframe(interactive=False, label="点击记录查看对应回合的证据")
                 history_text = gr.Markdown()
+                history_record = gr.State(None)
+                history_step = gr.Dropdown(choices=[], visible=False, label="历史证据步骤")
+                history_evidence_scope = gr.Markdown()
+                history_evidence_table = gr.Dataframe(interactive=False, visible=False, datatype="str", label="历史查询结果")
+                history_evidence_download = gr.DownloadButton("下载历史回合依据 JSON", visible=False)
         with gr.Accordion("接入新的Excel/CSV数据", open=initial_dataset is None):
             gr.Markdown("上传包含订单、客户、商品明细、支付、评价、商品、商家、品类和地理信息的 Excel 或 CSV 文件。先识别文件，再核对字段并导入。新导入按正式复赛金额规则计算：同一明细键出现不同非空商品价时，整单商品额和运费暂不计入，订单仍保留；原始记录完整留存。")
             upload_files = gr.File(file_count="multiple", file_types=[".csv", ".xlsx"], type="filepath", label="数据文件")
@@ -472,7 +516,7 @@ def build_ui():
         refresh.click(archives, dataset, saved)
         restore.click(restore_session, [saved, dataset], [*shared_outputs, *sql_outputs], concurrency_id="analysis")
         inputs = [message, chat, session, dataset, practice]
-        outputs = [message, chat, session, evidence, *result_outputs, saved]
+        outputs = [message, chat, session, evidence, *result_outputs, saved, dataset]
         send.click(submit, inputs, outputs, concurrency_limit=1, concurrency_id="analysis")
         message.submit(submit, inputs, outputs, concurrency_limit=1, concurrency_id="analysis")
         result_table.select(drill, [session, drill_target], shared_outputs, concurrency_limit=1, concurrency_id="analysis")
@@ -514,8 +558,15 @@ def build_ui():
         verify_sql_button.click(verify_sql, [sql_editor, sql_parameters, session, dataset, sql_scope], sql_validation, concurrency_id="analysis")
         inspect_files.click(inspect_upload, upload_files, [upload_structure, upload_mapping], concurrency_id="analysis")
         import_files.click(upload_dataset, [upload_files, upload_mapping, upload_name, upload_parent, upload_note, upload_origin], [dataset, practice, upload_status], concurrency_id="analysis")
-        history_search.click(find_history, [history_query, history_start, history_end, dataset], [history_hits, history_table, history_text], concurrency_id="analysis")
-        history_table.select(choose_history, [history_hits, dataset], saved, concurrency_id="analysis")
+        history_preview = [history_evidence_scope, history_evidence_table, history_evidence_download]
+        history_outputs = [history_record, history_step, *history_preview]
+        history_search.click(find_history, [history_query, history_start, history_end, dataset],
+                             [history_hits, history_table, history_text], concurrency_id="analysis").success(
+                                 clear_history_view, outputs=history_outputs, concurrency_id="analysis")
+        history_table.select(choose_history, [history_hits, dataset], [saved, *history_outputs], concurrency_id="analysis")
+        history_step.input(view_history, [history_record, history_step], history_preview, concurrency_id="analysis")
+        dataset.change(lambda: ([], gr.Dataframe(value=[]), "", *clear_history_view()),
+                       outputs=[history_hits, history_table, history_text, *history_outputs], concurrency_id="analysis")
         apply_conditions.click(apply_scope, [session, dataset, date_field, statuses, range_start, range_end, order_conditions, item_conditions], shared_outputs, concurrency_id="analysis")
         dataset.change(dataset_scope, dataset, [statuses, range_start, range_end], concurrency_id="analysis")
         dataset.change(dataset_ready, dataset, [analysis_workspace, empty_notice], concurrency_id="analysis")

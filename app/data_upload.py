@@ -2,6 +2,7 @@
 import csv
 import json
 import shutil
+from contextlib import ExitStack
 from pathlib import Path
 from uuid import uuid4
 
@@ -23,12 +24,12 @@ def discover(files: list[str]) -> dict:
                 sample = []
                 for _, row in zip(range(3), reader):
                     sample.append(row)
-                tables[path.name] = {"file": path.name, "sheet": None, "columns": reader.fieldnames, "sample": sample}
+                tables[path.name] = {"file": path.name, "sheet": None, "columns": reader.fieldnames or [], "sample": sample}
         elif path.suffix.lower() == ".xlsx":
             book = load_workbook(path, read_only=True, data_only=True)
             for sheet in book:
                 rows = sheet.iter_rows(values_only=True)
-                headers = [str(value) for value in next(rows)]
+                headers = [str(value) for value in next(rows, ())]
                 tables[f"{path.name}:{sheet.title}"] = {"file": path.name, "sheet": sheet.title, "columns": headers,
                     "sample": [dict(zip(headers, row)) for _, row in zip(range(3), rows)]}
             book.close()
@@ -80,17 +81,24 @@ def import_upload(files: list[str], mapping: dict, name: str, data_dir: Path = D
     dataset_id = "upload_" + uuid4().hex[:12]
     directory = data_dir / "uploads" / dataset_id
     directory.mkdir(parents=True)
-    copied = []
-    for path in paths.values():
-        target = directory / path.name
-        shutil.copyfile(path, target)
-        copied.append(target)
-    (directory / "mapping.json").write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
-    from app.calculation import ROUND2_RULE
-    version.setdefault("quality_rule_version", ROUND2_RULE)
-    return import_tables(dataset_id, tables, [*copied, directory / "mapping.json"], name or dataset_id, data_dir,
-                         practice={"year_context": None, "min_seller_orders": 1, "questions": []},
-                         **({"data_origin": "uploaded"} | version))
+    with ExitStack() as rollback:
+        rollback.callback(shutil.rmtree, directory)
+        copied = []
+        for path in paths.values():
+            target = directory / path.name
+            shutil.copyfile(path, target)
+            copied.append(target)
+        (directory / "mapping.json").write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
+        from app.calculation import ROUND2_RULE
+        version.setdefault("quality_rule_version", ROUND2_RULE)
+        rollback.callback(shutil.rmtree, data_dir / "sources" / dataset_id, ignore_errors=True)
+        for suffix in (".manifest.tmp", ".duckdb", ".duckdb.wal"):
+            rollback.callback((data_dir / (dataset_id + suffix)).unlink, missing_ok=True)
+        manifest = import_tables(dataset_id, tables, [*copied, directory / "mapping.json"], name or dataset_id, data_dir,
+                                 practice={"year_context": None, "min_seller_orders": 1, "questions": []},
+                                 **({"data_origin": "uploaded"} | version))
+        rollback.pop_all()
+    return manifest
 
 
 def registered_datasets(data_dir: Path = DATA_DIR) -> dict[str, str]:

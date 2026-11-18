@@ -50,7 +50,7 @@ class SessionStore:
                  "last_evidence": session.last_evidence, "analysis_evidence": session.analysis_evidence,
                  "drill_stack": session.drill_stack, "sql_state": session.sql_state, "workflow_evidence": session.workflow_evidence,
                  "focus_step": session.focus_step, "workflow_tasks": session.workflow_tasks,
-                 "comparison_state": session.comparison_state,
+                 "comparison_state": session.comparison_state, "reviews": session.reviews,
                  "analysis_anchor": session.analysis_anchor, "view_focus": session.view_focus}
         for name in ("last_successful_plan", "pending_plan", "last_result", "working_plan"):
             value = getattr(session, name)
@@ -83,6 +83,14 @@ class SessionStore:
             rows = conn.execute("SELECT session_id, title, updated_at FROM sessions WHERE dataset_id=? ORDER BY updated_at DESC",
                                 (dataset_id,)).fetchall()
         return [dict(zip(("session_id", "title", "updated_at"), row)) for row in rows]
+
+    def turn_evidence(self, session_id: str, turn_index: int, manifest: dict) -> dict | None:
+        from app.evidence import read_evidence
+        self.load(session_id, manifest)
+        with sqlite3.connect(self.path) as conn:
+            row = conn.execute("SELECT evidence_id FROM memories WHERE session_id=? AND turn_index=?",
+                               (session_id, turn_index)).fetchone()
+        return read_evidence(manifest, session_id, row[0]) if row and row[0] else None
 
     def search(self, query: str, manifest: dict, start=None, end=None, limit: int = 8) -> "list[dict]":
         """字符TF-IDF检索配合指标同义词归一化；不将另一版本数据作为当前结果。"""

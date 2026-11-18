@@ -27,7 +27,8 @@ def import_dataset(dataset_id: str, data_dir=DATA_DIR) -> dict:
 
 
 def import_tables(dataset_id: str, tables: dict, sources: list, name: str, data_dir=DATA_DIR, *, practice=None,
-                  business_label="", parent_dataset_id=None, change_note="", data_origin="constructed", source_kind=None, quality_rule_version=LEGACY_RULE) -> dict:
+                  business_label="", parent_dataset_id=None, change_note="", data_origin="constructed", source_kind=None, quality_rule_version=LEGACY_RULE,
+                  delivery_source_id=None) -> dict:
     context = CalculationContext(quality_rule_version)
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / f"{dataset_id}.duckdb"
@@ -126,6 +127,8 @@ def import_tables(dataset_id: str, tables: dict, sources: list, name: str, data_
         "practice": practice or {"year_context": 2025, "min_seller_orders": 10 if dataset_id == "excel_full" else 3, "questions": tables.get("practice_questions", [])},
     }
     manifest["database_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if delivery_source_id:
+        manifest["delivery_source_id"] = delivery_source_id
     pending = data_dir / f"{dataset_id}.manifest.tmp"
     pending.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     pending.replace(data_dir / f"{dataset_id}.manifest.json")

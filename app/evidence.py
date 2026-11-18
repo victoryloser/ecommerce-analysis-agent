@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -10,6 +11,22 @@ from app.sql_compiler import CompiledQuery
 from app.trace import TurnTrace
 from app.semantic import get_catalog
 from app.snapshots import implementation_hash
+
+
+def read_evidence(manifest: dict, session_id: str, record_id: str) -> dict:
+    from app.semantic import PlanError
+    if not re.fullmatch(r"[0-9a-f]{32}", record_id):
+        raise PlanError("证据编号无效")
+    path = RUNS_DIR / manifest["dataset_id"] / f"{record_id}.json"
+    if not path.is_file():
+        raise PlanError("该证据文件已不在本机，可恢复会话查看已保存的回答")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    snapshot_fields = ("dataset_id", "database_sha256", "metadata_sha256", "quality_rule_version")
+    if record.get("session_id") != session_id or record.get("record_id") != record_id or any(
+        record.get(key) != manifest.get(key) for key in snapshot_fields
+    ):
+        raise PlanError("证据与所选会话或快照不一致")
+    return record
 
 
 def write_evidence(session: Session, manifest: dict, question: str, plan: AnalysisPlan, model: str,

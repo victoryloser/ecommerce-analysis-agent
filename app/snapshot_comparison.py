@@ -5,6 +5,7 @@ import zipfile
 
 from app.config import RUNS_DIR
 from app.evidence import write_artifact
+from app.grouping import DIMENSION_LABELS
 from app.models import AnalysisPlan, ComparisonRequest
 from app.metadata import COMPARISON_METRICS
 from app.plan_update import replay_intent
@@ -51,9 +52,8 @@ def comparison_text(state):
         filters = "；".join(f"{label(f['field'])}：{','.join(f['values'])}" for f in plan["filters"])
         lines.append(f"{title}：{label(plan['time_field'])} [{period['start']}, {period['end']})；{filters or '无实体筛选'}。")
         if plan.get("group_by"):
-            names = {"month": "月份", "category": "品类", "seller": "商家"}
-            lines.append("联合分组：" + " × ".join(names[d] for d in plan["group_by"]) +
-                         (f"；按{names[plan['rank_within']]}分别排名" if plan.get("rank_within") else "") +
+            lines.append("联合分组：" + " × ".join(DIMENSION_LABELS[d] for d in plan["group_by"]) +
+                         (f"；按{DIMENSION_LABELS[plan['rank_within']]}分别排名" if plan.get("rank_within") else "") +
                          ("；另列品类内贡献" if plan.get("contribution_within") else "") + "。")
     if report["scope_changes"]:
         lines.append("范围变更详情：\n\n" + "\n\n".join(f"{label(field)}：{json.dumps(values[0], ensure_ascii=False)} → {json.dumps(values[1], ensure_ascii=False)}" for field, values in report["scope_changes"].items()))

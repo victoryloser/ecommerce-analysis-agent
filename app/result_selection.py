@@ -6,10 +6,10 @@ from app.semantic import PlanError
 
 
 GROUPS = {"类": "category", "品类": "category", "类别": "category", "商家": "seller",
-          "省份": "customer_state", "地区": "customer_state", "分组": None}
-GROUP = r"品类|类别|商家|省份|地区|分组"
+          "省份": "customer_state", "地区": "customer_state", "分组": None, "组合": None}
+GROUP = r"品类|类别|商家|省份|地区|分组|组合"
 DISPLAY = r"列出|展示|显示|返回|输出|给出|查看|列明"
-ALL = re.compile(rf"逐(?P<each>{GROUP}|类)(?=\s*(?:{DISPLAY}))|"
+ALL = re.compile(rf"逐(?P<each>{GROUP}|类|组)(?=\s*(?:{DISPLAY}))|"
                  rf"(?:{DISPLAY})\s*(?:全部|所有|每个)的?(?P<after>{GROUP})|"
                  rf"(?:全部|所有|每个)的?(?P<before>{GROUP})\s*(?:都|全部|分别)?\s*(?:{DISPLAY})|"
                  rf"(?:恢复|改为|改成|显示|展示|列出)\s*(?:全部|全量)(?=\s*(?:$|[。！？!?]))")

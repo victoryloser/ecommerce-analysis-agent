@@ -78,10 +78,12 @@ def test_import_and_query_without_local_samples(business_files, tmp_path):
 
 def test_empty_ui_can_import_and_analyze(business_files, tmp_path, monkeypatch):
     import gradio as gr
+    import shutil
     from gradio_client import Client, handle_file
     import app.ui as ui
 
     data_dir = tmp_path / "data"
+    monkeypatch.setenv("DATA_DELIVERY_DIR", str(tmp_path / "incoming"))
     monkeypatch.setattr(ui, "registered_datasets", lambda: registered_datasets(data_dir))
     monkeypatch.setattr(ui, "Executor", lambda dataset: Executor(dataset, data_dir))
     monkeypatch.setattr(ui, "SessionStore", lambda: SessionStore(data_dir / "sessions.sqlite3"))
@@ -126,6 +128,32 @@ def test_empty_ui_can_import_and_analyze(business_files, tmp_path, monkeypatch):
         result = client.predict("全部数据的商品销售额", [], dataset_id, False, api_name="/submit")
         assert result[2]["dataset_id"] == dataset_id
         assert result[2]["result"]["rows"] == [["12.50"]]
+        delivery = tmp_path / "incoming" / dataset_id
+        client.predict("数据更新了", [], dataset_id, False, api_name="/submit")
+        for path in business_files:
+            shutil.copy(path, delivery)
+        if (delivery / "order_items.csv").exists():
+            items = delivery / "order_items.csv"
+            items.write_bytes(items.read_bytes().replace(b"12.50", b"18.25"))
+        else:
+            from openpyxl import load_workbook
+            book = load_workbook(delivery / "business.xlsx")
+            sheet = book["order_items"]
+            index = list(SCHEMA["order_items"]).index("price") + 1
+            sheet.cell(2, index, 18.25)
+            book.save(delivery / "updated.xlsx")
+            book.close()
+            (delivery / "business.xlsx").unlink()
+        synced = client.predict("数据更新了", [], dataset_id, False, api_name="/submit")
+        new_id = synced[-1]["value"]
+        assert new_id != dataset_id and synced[2]["dataset_id"] == new_id
+        assert synced[2]["result"]["rows"] == [["18.25"]]
+        assert synced[2]["provenance"]["source_dataset_id"] == dataset_id
+        switched = client.predict(new_id, api_name="/switch_dataset")
+        assert switched[1]["record_id"] == synced[2]["record_id"]
+        repeated = client.predict("数据更新了", [], new_id, False, api_name="/submit")
+        assert repeated[2]["record_id"] == synced[2]["record_id"]
+        assert len(registered_datasets(data_dir)) == 2
         assert provider.calls == 1
     finally:
         demo.close()

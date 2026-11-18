@@ -23,6 +23,7 @@ class Session:
     focus_step: int | None = None
     workflow_tasks: list[dict] = field(default_factory=list)
     comparison_state: dict = field(default_factory=dict)
+    reviews: dict[str, str] = field(default_factory=dict)
     analysis_anchor: str | None = None
     view_focus: dict = field(default_factory=dict)
 

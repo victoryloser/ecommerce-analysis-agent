@@ -77,6 +77,67 @@ def test_joint_cells_and_order_grain(tmp_path, joint_tables):
     assert records(total)[0]["avg_review"] == 3
 
 
+def test_category_customer_province_preserves_items_orders_and_drill_scope(tmp_path, joint_tables):
+    customer = joint_tables["customers"][0]
+    joint_tables["customers"] += [{**customer, "customer_id": "c2", "customer_state": "B"},
+                                  {**customer, "customer_id": "c3", "customer_state": None}]
+    joint_tables["orders"][-1]["customer_id"] = "c2"
+    joint_tables["order_items"][3]["price"] = 150
+    joint_tables["orders"].append({**joint_tables["orders"][-1], "order_id": "a3", "customer_id": "c3"})
+    joint_tables["order_items"].append({**joint_tables["order_items"][3], "order_id": "a3", "price": 9})
+    for category in joint_tables["categories"]:
+        category["category_name_zh"] = "同名"
+    manifest = build(tmp_path, joint_tables)
+    oracle = SourceOracle("fixture", joint_tables, data_dir=tmp_path)
+    plan = plan_for(manifest, group_by=["customer_state", "category"], metric_ids=["sales", "freight", "order_count"])
+    result = execute(tmp_path, manifest, plan)
+    check_rows(result, oracle.evaluate(plan, with_quality=True))
+    rows = records(result)
+    assert {(r["category_id"], r["customer_state"]): (r["sales"], r["order_count"]) for r in rows} == {
+        ("K1", "A"): (150, 1), ("K1", "B"): (150, 1), ("K1", None): (9, 1), ("K2", "A"): (70, 1)}
+    total = records(execute(tmp_path, manifest, plan.model_copy(update={"group_by": None})))[0]
+    assert total["sales"] == sum(r["sales"] for r in rows) == 379
+    assert total["order_count"] == 3 < sum(r["order_count"] for r in rows)
+
+    rank = plan.model_copy(update={"intent": "rank", "metric_ids": ["sales"], "rank_within": "category", "top_n": 1})
+    ranked = execute(tmp_path, manifest, rank)
+    check_rows(ranked, oracle.evaluate(rank, with_quality=True))
+    assert {(r["category_id"], r["customer_state"]) for r in records(ranked)} == {("K1", "A"), ("K1", "B"), ("K2", "A")}
+    for province, expected in (("A", 150), (None, 9)):
+        index = next(i for i, r in enumerate(rows) if r["category_id"] == "K1" and r["customer_state"] == province)
+        child = drill_plan(plan, result, index, "items", manifest)
+        assert {f.field: f.values for f in child.filters} == ({"category_id": ["K1"], "customer_state": [province]} if province else {"category_id": ["K1"]})
+        if province is None:
+            assert child.order_where.field == "customer_state" and child.order_where.operator == "is_null"
+        assert sum(r["price"] for r in records(execute(tmp_path, manifest, child))) == expected
+    ranked_by_province = rank.model_copy(update={"rank_within": "customer_state"})
+    check_rows(execute(tmp_path, manifest, ranked_by_province), oracle.evaluate(ranked_by_province, with_quality=True))
+    with pytest.raises(PlanError, match="组内去重订单数"):
+        validate_plan(plan.model_copy(update={"metric_ids": ["payment_amount"]}), manifest)
+
+
+def test_category_customer_province_contribution_and_snapshot_replay(tmp_path, joint_tables):
+    manifest = build(tmp_path, joint_tables)
+    regional = plan_for(manifest, group_by=["category", "customer_state"], intent="contribution", metric_ids=["freight"],
+                        contribution_within="category", comparison_range={"start": "2027-03-01", "end": "2027-04-01"}, limit_mode="all")
+    result = execute(tmp_path, manifest, regional)
+    oracle = SourceOracle("fixture", joint_tables, data_dir=tmp_path)
+    check_rows(result, oracle.evaluate(regional, with_quality=True))
+    assert all(r["total_change"] == 0 and r["contribution_rate"] is None for r in records(result))
+
+    revised = deepcopy(joint_tables)
+    revised["customers"].append({**revised["customers"][0], "customer_id": "c2", "customer_state": "B"})
+    revised["orders"][2]["customer_id"] = "c2"
+    second = build(tmp_path, revised, "target")
+    before = regional.model_copy(update={"intent": "compare", "metric_ids": ["sales", "order_count", "freight"], "contribution_within": None})
+    after = before.model_copy(update={"dataset_id": second["dataset_id"]})
+    check_rows(execute(tmp_path, second, after), SourceOracle("target", revised, data_dir=tmp_path).evaluate(after, with_quality=True))
+    report = compare_snapshots([tmp_path/"fixture.duckdb", tmp_path/"target.duckdb"], [before, after], tmp_path/"regional-diff")
+    assert report["status"] == "completed" and not report["scope_changes"]
+    corrections = {tuple(json.loads(row["entity_id"]).values()): row["revision_effect"] for row in report["reconciliation"] if row["metric"] == "sales"}
+    assert corrections == {("K1", "A"): -150, ("K2", "A"): -70, ("K1", "B"): 150, ("K2", "B"): 70}
+
+
 @pytest.mark.parametrize("group_by", [["category", "seller"], ["month", "category"]])
 def test_conflict_and_scope_quality_matches_independent_oracle(tmp_path, joint_tables, group_by):
     joint_tables["order_items"].append({**joint_tables["order_items"][-1], "price": 110})

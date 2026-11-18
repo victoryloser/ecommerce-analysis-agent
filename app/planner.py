@@ -32,8 +32,8 @@ output_mode默认analysis；需要商家排名并任选冠军有效订单核查�
 用户明确提出新问题时放弃旧澄清，不继承无关的过滤条件。
 compare需要显式当前和基期范围，支持多个指标及品类/商家/省份/履约状态分组。rank按首个指标降序且保留并列。
 比较两个整月的总体订单数、商品额或运费时，月份只写入time_range和comparison_range，dimension=total且不填写group_by；结果会分别展示两个月。dimension=month/group_by=[month]只用于aggregate逐月序列，不能用于compare两期比较。
-联合分析用group_by=[category,seller]或[month,category]且dimension=total；同一明细组成组合，不把订单的品类集合与商家集合交叉。支持sales/freight/order_count/delay_rate/avg_review/low_score_rate；评价与履约属于含该组合的整单样本，不是商品独有评分。含month只做aggregate/rank，不做两期compare/contribution。
-全局组合排名rank_within=null；每品类内商家排名rank_within=category，每月内品类排名rank_within=month。贡献可用contribution_within=category另列品类内分母，同时保留全范围贡献；看下降驱动用contribution_direction=decrease。Top N保留并列，分母不受Top N影响。
+联合分析用group_by=[category,seller]或[month,category]且dimension=total；同一明细组成组合，评价和履约属于对应整单。含month只做aggregate/rank。品类与客户地区用[category,customer_state]，支持sales/freight/order_count，客户省份来自订单的客户。
+全局组合排名rank_within=null；每品类内商家或客户省份排名rank_within=category，每月内品类排名rank_within=month。贡献可用contribution_within=category另列品类内分母，同时保留全范围贡献；看下降驱动用contribution_direction=decrease。Top N保留并列，分母不受Top N影响。
 增加/去掉分组用update.field=group_by、values为完整的新分组列表；取消品类或商家筛选用category_id/seller_id，不能混淆。联合分组不支持支付分摊及复购，遇混合问题拆为可支持的独立步骤。
 增长贡献用contribution、一个可加金额指标、品类/商家/省份/履约状态分组，输出变化额及占净增长比例；无支付分摊规则。
 查询订单/商品明细/支付记录/评价详情用details及detail_level=orders/items/payments/reviews；指定订单填写selected_order_id。

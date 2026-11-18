@@ -185,7 +185,7 @@ class AnalysisAgent:
             self.checkpoint(session)
             return turn
 
-    def replay(self, session, dataset_id):
+    def replay(self, session, dataset_id, *, question="在新快照重算"):
         from app.plan_update import replay_intent
         from app.semantic import validate_plan
         base = session.working_plan or session.last_successful_plan
@@ -197,17 +197,17 @@ class AnalysisAgent:
         fresh = Session(dataset_id)
         provenance = {"source_session_id": session.session_id, "source_dataset_id": session.dataset_id,
                       "source_record_id": session.analysis_evidence.get("record_id"), "intent": base.model_dump(mode="json")}
-        with TurnTrace(fresh.session_id, dataset_id, "在新快照重算", "snapshot-replay") as trace:
+        with TurnTrace(fresh.session_id, dataset_id, question, "snapshot-replay") as trace:
             if plan.intent == "workflow":
-                turn = self.run_workflow(fresh, plan, "在新快照重算", 0, trace)
-                turn.evidence = write_artifact(fresh, manifest, "workflow", "在新快照重算",
+                turn = self.run_workflow(fresh, plan, question, 0, trace)
+                turn.evidence = write_artifact(fresh, manifest, "workflow", question,
                     {"plan": turn.evidence["plan"], "steps": turn.evidence["steps"], "tasks": fresh.workflow_tasks,
                      "focus_step": fresh.focus_step, "provenance": provenance}, trace)
                 fresh.workflow_evidence = turn.evidence
             else:
                 fresh.working_plan = plan
-                turn = self.run_plan(fresh, plan, "在新快照重算", 0, trace, provenance=provenance)
-                fresh.remember("在新快照重算", turn.text)
+                turn = self.run_plan(fresh, plan, question, 0, trace, provenance=provenance)
+                fresh.remember(question, turn.text)
             fresh.last_evidence = turn.evidence
             self.checkpoint(fresh)
         return fresh, turn

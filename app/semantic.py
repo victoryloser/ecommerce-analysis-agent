@@ -7,7 +7,7 @@ from app.config import DATA_DIR, METADATA_VERSION
 from app.models import AnalysisIntent, AnalysisPlan
 from app.metadata import METRIC_DETAILS, metric_detail, required_tables, table_detail
 from app.source import SCHEMA
-from app.grouping import dimensions, JOINT_GROUPS
+from app.grouping import dimensions, JOINT_GROUPS, REGIONAL_GROUP, REGIONAL_METRICS
 from app.calculation import CalculationContext, LEGACY_CONTEXT
 
 METRICS = {
@@ -47,7 +47,7 @@ def catalog(manifest: dict) -> dict:
     return {
         "quality_rule_version": context.rule_version, "effective_metadata_sha256": metadata_hash(context),
         "dataset_id": manifest["dataset_id"], "metadata_version": manifest["metadata_version"],
-        "coverage": manifest["coverage"], "metrics": {m: {"summary": description, **metric_detail(m, context)} for m, description in METRICS.items()},
+        "coverage": manifest["coverage"], "metrics": {m: {"summary": description, **metric_detail(m, context, include_regional=True)} for m, description in METRICS.items()},
         "coverage_fields": manifest.get("coverage_fields", {"purchase_at": manifest["coverage"]}),
         "dimensions": ["total", "month", "category", "seller", "delivery_status", "customer_state"],
         "joint_groups": JOINT_GROUPS,
@@ -65,7 +65,7 @@ def catalog(manifest: dict) -> dict:
             "history": "检索已保存会话，history_query为内容，history_start/end按会话更新时间左闭右开筛选",
             "predicates": "order_where用于订单粒度（order_sales/order_freight为完整订单金额），item_where用于明细粒度；分别支持all/any/negate与比较/IN/NOT IN/BETWEEN/空值",
             "rank": "非total维度，按第一个指标降序；按订单数门槛过滤，并保留边界并列",
-            "joint_analysis": "group_by支持category+seller和month+category；商品额、运费、订单、延迟和整单评价；禁止支付分摊与联合复购。含month仅汇总/排名。rank_within指定组内排名，contribution_within指定品类内分母；contribution_direction=decrease查看下降驱动。",
+            "joint_analysis": "category+seller、month+category支持金额、订单、履约与评价；category+customer_state支持商品额、运费、订单数。含month仅汇总/排名；禁止分摊支付和联合复购。可按品类排名或计算品类内金额贡献。",
         },
     }
 
@@ -85,10 +85,10 @@ def get_catalog(manifest: dict, plan: AnalysisPlan) -> dict:
     result = {"dataset_id": manifest["dataset_id"], "metadata_version": manifest["metadata_version"],
             "metadata_sha256": manifest["metadata_sha256"],
             "quality_rule_version": context.rule_version, "effective_metadata_sha256": metadata_hash(context),
-            "metrics": {m: metric_detail(m, context) for m in plan.metric_ids},
+            "metrics": {m: metric_detail(m, context, include_regional=True) for m in plan.metric_ids},
             "tables": {t: table_detail(t) for t in sorted(tables)}, "relationships": RELATIONSHIPS}
     result["applied_scope"] = {"time_field": plan.time_field, "order_statuses": plan.order_statuses,
-                               "group_by": list(dimensions(plan)), "grouping_version": "joint-v1",
+                               "group_by": list(dimensions(plan)), "grouping_version": "joint-v2" if dimensions(plan) == REGIONAL_GROUP else "joint-v1",
                                "rank_within": plan.rank_within, "contribution_within": plan.contribution_within,
                                "order_where": plan.order_where.model_dump(mode="json") if plan.order_where else None,
                                "item_where": plan.item_where.model_dump(mode="json") if plan.item_where else None}
@@ -128,13 +128,15 @@ def validate_plan(plan: AnalysisPlan, manifest: dict, *, allow_binding=False) ->
         raise PlanError("核查商家不在当前数据目录中")
     dims = dimensions(plan)
     if plan.group_by and dims not in JOINT_GROUPS:
-        raise PlanError("联合分组仅支持品类与商家、月份与品类")
+        raise PlanError("联合分组仅支持品类与商家、月份与品类、品类与客户省份")
     if plan.group_by and plan.intent not in {"aggregate", "rank", "compare", "contribution", "clarify"}:
         raise PlanError("联合分组用于汇总、排名、期间比较与商品额贡献")
+    if dims == REGIONAL_GROUP and set(plan.metric_ids) - REGIONAL_METRICS:
+        raise PlanError("品类与客户省份联合分析支持商品额、运费和组内去重订单数")
     if plan.rank_within and (len(dims) != 2 or plan.rank_within not in dims or plan.intent not in {"rank", "clarify"}):
         raise PlanError("组内排名需要联合维度及其中一个排名分区")
-    if plan.contribution_within and (plan.intent != "contribution" or dims != ("category", "seller") or plan.contribution_within != "category"):
-        raise PlanError("父组贡献仅支持品类与商家分析中的品类内贡献")
+    if plan.contribution_within and (plan.intent != "contribution" or dims not in {("category", "seller"), REGIONAL_GROUP} or plan.contribution_within != "category"):
+        raise PlanError("父组贡献支持品类与商家、品类与客户省份的品类内贡献")
     if plan.bind_mode == "group" and not plan.source_step:
         raise PlanError("组合绑定需要来源步骤")
     is_workflow = plan.intent == "workflow" or (plan.intent == "clarify" and plan.pending_intent == "workflow")

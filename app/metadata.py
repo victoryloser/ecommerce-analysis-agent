@@ -54,13 +54,18 @@ FIELD_MEANINGS = {
 }
 
 
-def metric_detail(metric_id: str, context=None) -> dict:
+def metric_detail(metric_id: str, context=None, *, include_regional=False) -> dict:
     dimensions = ["total", "month", "customer_state"] if metric_id == "repeat_customers" else [d for d in DIMENSIONS if d not in {"seller", "category"}] if metric_id == "payment_amount" else DIMENSIONS
     result = {"id": metric_id, **METRIC_DETAILS[metric_id], "expression": EXPRESSIONS[metric_id],
             "required_filter": {"orders.order_status": "delivered"}, "time_field": "orders.purchase_at",
             "dimensions": dimensions,
             "joint_groups": [["category", "seller"], ["month", "category"]] if metric_id not in {"payment_amount", "repeat_customers"} else [],
             "rounding": "金额、评分和展示百分比保留2位，HALF_UP；中间金额DECIMAL"}
+    # New runtime grouping capabilities do not change the metric contract stored in existing snapshots.
+    if include_regional:
+        from app.grouping import REGIONAL_GROUP, REGIONAL_METRICS
+        if metric_id in REGIONAL_METRICS:
+            result["joint_groups"].append(list(REGIONAL_GROUP))
     from app.calculation import LEGACY_CONTEXT
     context = context or LEGACY_CONTEXT
     result["rule_version"] = context.rule_version

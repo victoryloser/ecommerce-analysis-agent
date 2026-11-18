@@ -186,8 +186,8 @@ def advanced_answer(plan: AnalysisPlan, result: QueryResult, manifest: dict) -> 
         return text + "\n\n没有符合当前条件的记录。"
     notes = []
     if plan.group_by:
-        names = {"category": "品类", "seller": "商家", "month": "月份"}
-        notes.append("联合分组：" + " × ".join(names[d] for d in plan.group_by) + "。商品额按实际明细归属；各组合订单数不能相加作为总体订单数。")
+        from app.grouping import DIMENSION_LABELS
+        notes.append("联合分组：" + " × ".join(DIMENSION_LABELS[d] for d in plan.group_by) + "。商品额按实际明细归属；各组合订单数不能相加作为总体订单数。")
         if set(plan.metric_ids) & {"delay_rate", "avg_review", "low_score_rate"}:
             notes.append("履约与评价统计的是包含该组合商品的整单样本；各组合可包含同一订单，父级比率与评分需重新去重计算。")
     if plan.intent == "rank":
