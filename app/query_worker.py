@@ -46,7 +46,8 @@ def _query(path: str, compiled: CompiledQuery, pipe, offset=0, limit=MAX_ROWS, e
                 rows = cursor.fetchmany(limit + 1)
                 columns, visible, quality = decode_quality([col[0] for col in cursor.description], rows[:limit])
                 ratios = resolve_ratios(columns, visible, compiled.ratios)
-                pipe.send({"columns": columns, "rows": visible, "quality": quality, "ratios": ratios, "truncated": len(rows) > limit, "row_offset": offset})
+                pipe.send({"columns": columns, "rows": visible, "quality": quality, "ratios": ratios,
+                           "truncated": len(rows) > limit, "row_offset": offset, "page_size": limit})
     except (duckdb.Error, ValueError, DecimalException) as error:
         # 数据库错误跨进程传回；不改 SQL、不换库、不返回伪造的 0。
         pipe.send({"error": str(error)})

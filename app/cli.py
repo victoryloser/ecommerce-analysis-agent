@@ -1,8 +1,10 @@
 import argparse
 
+import httpx
+
 from app.executor import Executor
 from app.orchestrator import AnalysisAgent
-from app.providers import ChatCompletionsProvider
+from app.providers import ChatCompletionsProvider, ModelConfigurationError, model_error_message
 from app.session import Session
 from app.session_store import SessionStore
 from app.sql_workspace import SQLWorkspace, sql_answer
@@ -31,10 +33,12 @@ def main():
         return
     executors = {key: Executor(key) for key in datasets}
     executor = executors[args.dataset]
-    agent = AnalysisAgent(ChatCompletionsProvider(), executors, store)
+    agent = AnalysisAgent(None, executors, store)
     workspace = SQLWorkspace(agent.executors, store)
     session = store.load(args.session, executor.manifest) if args.session else Session(args.dataset)
     print(f"会话ID：{session.session_id}（自动保存）；/drill 行号 维度、/back、/sql SELECT…、/raw SELECT…")
+    print("模型请求失败后用 /retry 重发原问题。已开始执行的查询可用 /continue 继续。")
+    failed_question = None
     while (question := input("\n问题> ").strip()) != "/exit":
         if question.startswith("/drill "):
             _, row, dimension = question.split()
@@ -43,6 +47,11 @@ def main():
             turn = agent.back(session)
         elif question in {"/next", "/prev"}:
             turn = agent.page(session, 1 if question == "/next" else -1)
+        elif question == "/continue":
+            if session.working_plan is None:
+                print("当前没有可继续的查询。")
+                continue
+            turn = agent.resume_inspection(session)
         elif question == "/export":
             print(agent.export(session))
             continue
@@ -64,7 +73,20 @@ def main():
             print(evidence["result"])
             continue
         else:
-            turn = agent.respond(session, question, args.practice)
+            if question == "/retry":
+                if failed_question is None:
+                    print("当前没有待重发的模型问题。")
+                    continue
+                question = failed_question
+            try:
+                if agent.provider is None:
+                    agent.provider = ChatCompletionsProvider()
+                turn = agent.respond(session, question, args.practice)
+            except (httpx.HTTPError, ModelConfigurationError) as error:
+                failed_question = question
+                print(model_error_message(error) + " 原问题已保留，可输入 /retry。")
+                continue
+            failed_question = None
         print(turn.text)
         if "record_id" in turn.evidence:
             print(f"\n证据：runs/{args.dataset}/{turn.evidence['record_id']}.json")

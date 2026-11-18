@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from app.answers import answer, explain
+from app.config import MAX_ROWS
 from app.evidence import write_evidence, write_artifact
 from app.executor import Executor
 from app.planner import make_plan
@@ -428,26 +429,32 @@ class AnalysisAgent:
             self.store.save(session, self.executors[session.dataset_id].manifest)
         return Turn(text, evidence)
 
-    def page(self, session: Session, delta: int, page_size: int = 100) -> Turn:
+    def page(self, session: Session, delta: int, page_size: int | None = None) -> Turn:
         from app.models import AnalysisPlan
         from app.presentation import display_evidence
         evidence = display_evidence(session.last_evidence)
         previous = evidence.get("result")
         if not previous or evidence["type"] not in {"query", "sql_exploration"}:
             raise PlanError("当前没有可分页的查询结果")
-        if delta > 0 and not previous["truncated"]:
+        old_offset = previous["row_offset"]
+        displayed = len(previous["rows"])
+        # Old evidence has no page size. A truncated page still reveals its actual width.
+        current_size = previous.get("page_size") or (displayed if previous["truncated"] else page_size or MAX_ROWS)
+        size = page_size if page_size is not None else current_size
+        reset = delta == 0 or (previous.get("page_size") is not None and size != current_size)
+        if not reset and delta > 0 and not previous["truncated"]:
             raise PlanError("已到最后一页")
-        offset = max(0, previous.get("row_offset", 0) + delta*int(page_size))
+        offset = 0 if reset else old_offset + displayed if delta > 0 else max(0, old_offset-current_size)
         if evidence["type"] == "sql_exploration":
             from app.sql_workspace import SQLWorkspace, sql_answer
             state = session.sql_state
-            new = SQLWorkspace(self.executors, self.store).execute(session, state["sql"], state["parameters"], state["scope"], offset=offset, limit=int(page_size))
+            new = SQLWorkspace(self.executors, self.store).execute(session, state["sql"], state["parameters"], state["scope"], offset=offset, limit=size)
             return Turn(sql_answer(new), new)
         plan = AnalysisPlan.model_validate(evidence["plan"])
         executor = self.executors[session.dataset_id]
         with TurnTrace(session.session_id, session.dataset_id, f"结果翻页 offset={offset}", "pagination") as trace:
             trace.consume("query")
-            result, compiled = executor.execute_plan(session, executor.register(session, plan), trace, offset=offset, limit=int(page_size))
+            result, compiled = executor.execute_plan(session, executor.register(session, plan), trace, offset=offset, limit=size)
             text = answer(plan, result, executor.manifest)
             new = write_evidence(session, executor.manifest, "结果翻页", plan, "pagination", 0, result, compiled, trace,
                                  provenance={"parent_record_id": evidence["record_id"], "row_offset": offset})
@@ -456,7 +463,7 @@ class AnalysisAgent:
                 session.last_successful_plan = plan
                 session.analysis_evidence = new
                 session.view_focus = {**session.view_focus, "record_id": new["record_id"]}
-            session.last_evidence = new
+                session.last_evidence = new
             if self.store:
                 self.store.save(session, executor.manifest)
             return Turn(text, new)

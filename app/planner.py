@@ -8,6 +8,7 @@ from app.models import AnalysisPlan
 from app.plan_update import apply_updates, expand_periods
 from app.clarification import bind_entities, resolve_slots
 from app.providers import Provider
+from app.result_selection import apply_result_selection
 from app.semantic import PlanError, catalog, get_catalog, validate_plan
 from app.session import Session
 from app.trace import TurnTrace
@@ -144,6 +145,7 @@ def make_plan(provider: Provider, manifest: dict, session: Session, question: st
         plan = bind_entities(plan, manifest, question)
         from app.task_shapes import expand_output
         plan = expand_output(plan)
+        plan = apply_result_selection(plan, question, trace)
         validate_plan(plan, manifest)
         trace.record("plan_validated", plan=plan.model_dump(mode="json"))
         return plan, trace.model_calls

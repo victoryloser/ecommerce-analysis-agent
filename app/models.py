@@ -156,6 +156,7 @@ class QueryResult(Contract):
     elapsed_ms: int = 0
     error: str | None = None
     row_offset: int = 0
+    page_size: int | None = None
     export_file: str | None = None
     row_count: int | None = None
     quality: list[dict] = Field(default_factory=list)

@@ -2,12 +2,14 @@ import argparse
 import json
 import re
 
-from app.config import DATASETS
+import httpx
+
+from app.config import DATASETS, MAX_ROWS
 from app.executor import Executor
 from app.orchestrator import AnalysisAgent
 from app.presentation import present
 from app.answers import STATUS_LABELS
-from app.providers import ChatCompletionsProvider
+from app.providers import ChatCompletionsProvider, ModelConfigurationError, model_error_message
 from app.session import Session
 from app.models import AnalysisPlan
 from app.clarification import choices
@@ -84,8 +86,12 @@ def build_ui():
 
     def submit(question, history, session, dataset_id, practice_context):
         session = current_session(session if session and session.dataset_id == dataset_id else None, dataset_id)
-        provider()
-        turn = agent.respond(session, question, practice_context)
+        try:
+            provider()
+            turn = agent.respond(session, question, practice_context)
+        except (httpx.HTTPError, ModelConfigurationError) as error:
+            gr.Warning(model_error_message(error))
+            return question, session.transcript, session, gr.skip(), *(gr.skip() for _ in result_outputs), archives(dataset_id, session.session_id)
         return "", session.transcript, session, turn.evidence, *result_components(turn.evidence), archives(dataset_id, session.session_id)
 
     def switch_dataset(dataset_id, session):
@@ -147,9 +153,17 @@ def build_ui():
         plan = current.get("plan", {})
         can_drill = ready and current.get("type") == "query" and plan.get("intent") in {"aggregate", "rank", "compare", "contribution", "details", "diagnose"}
         workflow = session.selected_workflow() if session else {}
+        can_retry = (current.get("type") == "query" and result.get("status") in {"timeout", "error"}
+                     and session and session.working_plan and session.working_plan.model_dump(mode="json") == plan)
+        page_note = ""
+        if result.get("rows") and (result["truncated"] or result["row_offset"]):
+            page_note = f"显示第 {result['row_offset']+1}–{result['row_offset']+len(result['rows'])} 条"
+            if not result["truncated"]:
+                page_note += "，已到末页"
         return (gr.Row(visible=can_drill), gr.Row(visible=workflow.get("type") == "workflow"),
                 gr.Row(visible=ready and (result.get("truncated", False) or result.get("row_offset", 0) > 0 or len(result.get("rows", [])) >= 100)),
-                gr.Button(visible=ready), gr.Accordion(visible=bool(numeric_columns(evidence))))
+                gr.Button(visible=ready), gr.Accordion(visible=bool(numeric_columns(evidence))),
+                gr.Button(visible=can_retry and not workflow), result.get("page_size") or MAX_ROWS, page_note)
 
     def catalog_table(catalog):
         rows = []
@@ -267,17 +281,15 @@ def build_ui():
         agent.drill(session, row, target)
         return session.transcript, session, session.last_evidence, *result_components(session.last_evidence), archives(session.dataset_id, session.session_id)
 
-    def page_previous(session, size):
-        agent.page(session, -1, int(size))
+    def paginate(session, size, delta):
+        turn = agent.page(session, delta, int(size))
+        if turn.evidence["result"]["status"] not in {"ok", "empty"}:
+            gr.Warning(turn.evidence["result"]["error"])
         return session.transcript, session, session.last_evidence, *result_components(session.last_evidence), archives(session.dataset_id, session.session_id)
 
-    def page_next(session, size):
-        agent.page(session, 1, int(size))
-        return session.transcript, session, session.last_evidence, *result_components(session.last_evidence), archives(session.dataset_id, session.session_id)
-
-    def page_refresh(session, size):
-        agent.page(session, 0, int(size))
-        return session.transcript, session, session.last_evidence, *result_components(session.last_evidence), archives(session.dataset_id, session.session_id)
+    def resume_analysis(session):
+        turn = agent.resume_inspection(session)
+        return session.transcript, session, turn.evidence, *result_components(turn.evidence), archives(session.dataset_id, session.session_id)
 
     def full_export(session):
         record = agent.export(session)
@@ -363,11 +375,13 @@ def build_ui():
                 step_number = gr.Number(value=1, precision=0, minimum=1, maximum=6, label="分析步骤")
                 show_step = gr.Button("查看此步骤结果")
                 resume_tasks = gr.Button("继续未完成任务")
+            retry_query = gr.Button("重试本次查询", visible=False)
             with gr.Row(visible=False) as pagination_controls:
-                page_size = gr.Number(value=100, precision=0, minimum=1, maximum=500, label="每页行数")
+                page_size = gr.Number(value=MAX_ROWS, precision=0, minimum=1, maximum=MAX_ROWS, label="每页行数")
                 previous_page = gr.Button("上一页")
                 next_page = gr.Button("下一页")
-                refresh_page = gr.Button("更新显示行数")
+                refresh_page = gr.Button("应用页长并返回首页")
+            page_status = gr.Markdown()
             with gr.Row():
                 download_csv = gr.DownloadButton("下载结果 CSV", visible=False)
                 download_json = gr.DownloadButton("下载完整依据 JSON", visible=False)
@@ -471,23 +485,23 @@ def build_ui():
         evidence.change(scope_view, [evidence, session], active_scope, concurrency_id="analysis")
         quality_parent = gr.State(None)
         evidence.change(reset_quality, [evidence, quality_parent], [quality_table, quality_download, quality_summary, quality_source, quality_full, quality_export, quality_source_panel], concurrency_id="analysis")
-        evidence.change(result_controls, [evidence, session], [drill_controls, workflow_controls, pagination_controls, export_all, chart_controls], concurrency_id="analysis")
+        evidence.change(result_controls, [evidence, session], [drill_controls, workflow_controls, pagination_controls, export_all, chart_controls, retry_query, page_size, page_status], concurrency_id="analysis")
         sql_catalog.change(catalog_table, sql_catalog, sql_fields, concurrency_id="analysis")
         sql_validation.change(validation_text, sql_validation, sql_validation_message, concurrency_id="analysis")
         upload_mapping.change(mapping_table, upload_mapping, upload_fields, concurrency_id="analysis")
         upload_fields.input(save_mapping, upload_fields, upload_mapping, concurrency_id="analysis")
         chart_metrics.change(render_charts, [evidence, chart_metrics], interactive_charts, concurrency_id="analysis")
         interactive_charts.select(chart_drill, [session, drill_target], shared_outputs, concurrency_id="analysis")
-        previous_page.click(page_previous, [session, page_size], shared_outputs, concurrency_id="analysis")
-        next_page.click(page_next, [session, page_size], shared_outputs, concurrency_id="analysis")
-        refresh_page.click(page_refresh, [session, page_size], shared_outputs, concurrency_id="analysis")
+        previous_page.click(lambda s, size: paginate(s, size, -1), [session, page_size], shared_outputs, concurrency_id="analysis")
+        next_page.click(lambda s, size: paginate(s, size, 1), [session, page_size], shared_outputs, concurrency_id="analysis")
+        refresh_page.click(lambda s, size: paginate(s, size, 0), [session, page_size], shared_outputs, concurrency_id="analysis")
         export_all.click(full_export, session, [download_all, export_status], concurrency_id="analysis")
         inspect_quality_button.click(inspect_quality, [session, evidence], [quality_table, quality_download, quality_summary, quality_export, quality_source_panel, quality_parent], concurrency_id="analysis")
         quality_table.select(inspect_source, session, quality_source, concurrency_id="analysis")
         quality_export.click(lambda s: gr.DownloadButton(value=agent.quality_export(s)["csv_file"], visible=True), session, quality_full, concurrency_id="analysis")
         show_step.click(select_step, [session, step_number], [session, evidence, *result_outputs], concurrency_id="analysis")
-        resume_tasks.click(lambda session: (agent.resume_inspection(session), session)[1], session, session, concurrency_id="analysis").then(
-            lambda s: (s.transcript, s, s.last_evidence, *result_components(s.last_evidence), archives(s.dataset_id, s.session_id)), session, shared_outputs, concurrency_id="analysis")
+        resume_tasks.click(resume_analysis, session, shared_outputs, concurrency_id="analysis")
+        retry_query.click(resume_analysis, session, shared_outputs, concurrency_id="analysis")
         remove_filter.click(remove_condition, [session, condition_field], shared_outputs, concurrency_id="analysis")
         replay_button.click(replay_current, [session, replay_target], [*shared_outputs, dataset], concurrency_id="analysis")
         comparison_outputs = [chat, session, comparison_summary, comparison_table, comparison_changes, comparison_bundle, comparison_report, comparison_json, saved]

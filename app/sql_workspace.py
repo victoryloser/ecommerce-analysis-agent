@@ -9,7 +9,7 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer.qualify import qualify
 
-from app.config import RUNS_DIR
+from app.config import MAX_ROWS, RUNS_DIR
 from app.metadata import table_detail
 from app.models import Contract, QueryResult
 from app.query_worker import run_query
@@ -111,7 +111,7 @@ class SQLWorkspace:
                 self.store.save(session, self.executors[session.dataset_id].manifest)
             return draft
 
-    def execute(self, session, sql: str, parameters: list, scope: Scope, *, offset=0, limit=500) -> dict:
+    def execute(self, session, sql: str, parameters: list, scope: Scope, *, offset=0, limit=MAX_ROWS) -> dict:
         executor = self.executors[session.dataset_id]
         with TurnTrace(session.session_id, session.dataset_id, sql, "user-sql") as trace:
             draft = session.sql_state

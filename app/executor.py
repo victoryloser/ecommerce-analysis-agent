@@ -4,7 +4,7 @@ from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
-from app.config import DATA_DIR
+from app.config import DATA_DIR, MAX_ROWS
 from app.models import AnalysisPlan, QueryResult
 from app.query_worker import run_query
 from app.semantic import load_manifest, validate_plan
@@ -34,7 +34,7 @@ class Executor:
         session.registered_plans[plan_id] = plan.model_copy(deep=True)
         return plan_id
 
-    def execute_plan(self, session: Session, plan_id: str, trace=None, *, offset=0, limit=500) -> tuple[QueryResult, CompiledQuery]:
+    def execute_plan(self, session: Session, plan_id: str, trace=None, *, offset=0, limit=MAX_ROWS) -> tuple[QueryResult, CompiledQuery]:
         if session.dataset_id != self.manifest["dataset_id"]:
             raise ValueError("执行器与会话数据集不一致")
         plan = session.registered_plans.pop(plan_id)

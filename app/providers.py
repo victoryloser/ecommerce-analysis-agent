@@ -16,6 +16,27 @@ class Provider(Protocol):
     def complete(self, messages: list[dict]) -> str: ...
 
 
+class ModelConfigurationError(ValueError):
+    pass
+
+
+def model_error_message(error: httpx.HTTPError | ModelConfigurationError) -> str:
+    if isinstance(error, ModelConfigurationError):
+        return str(error)
+    if isinstance(error, httpx.TimeoutException):
+        return "模型请求超时。请稍后重发原问题。"
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        if status in {401, 403}:
+            return f"模型服务拒绝访问（HTTP {status}）。请检查密钥及模型权限。若修改了 .env，请重启应用。"
+        if status == 429:
+            return "模型服务暂时限流（HTTP 429）。请稍后重发原问题。"
+        if status >= 500:
+            return f"模型服务暂时不可用（HTTP {status}）。请稍后重发原问题。"
+            return f"模型服务未接受请求（HTTP {status}）。请检查模型和接口配置。若修改了 .env，请重启应用。"
+    return "无法连接模型服务。请检查网络和接口地址后重发原问题。"
+
+
 class ChatCompletionsProvider:
     """显式配置的 Chat Completions JSON 协议；没有默认模型和协议探测。"""
 
@@ -23,14 +44,17 @@ class ChatCompletionsProvider:
         load_dotenv(ROOT / ".env")
         missing = [name for name in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL") if not os.getenv(name)]
         if missing:
-            raise ValueError(f"class1/.env 缺少配置：{', '.join(missing)}；请从 .env.example 复制并填写")
+            raise ModelConfigurationError(f"class1/.env 缺少配置：{', '.join(missing)}。请参照 .env.example 补齐后重发原问题。")
         self.base_url = os.environ["LLM_BASE_URL"].rstrip("/")
         self.api_key = os.environ["LLM_API_KEY"]
         self.model = os.environ["LLM_MODEL"]
-        self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
+        try:
+            self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
+        except ValueError as error:
+            raise ModelConfigurationError("LLM_TIMEOUT_SECONDS 必须填写秒数。请修正 .env 并重启应用。") from error
         thinking = os.getenv("LLM_ENABLE_THINKING")
         if thinking is not None and thinking.lower() not in {"true", "false"}:
-            raise ValueError("LLM_ENABLE_THINKING 必须为 true 或 false；不配置则使用服务默认值")
+            raise ModelConfigurationError("LLM_ENABLE_THINKING 必须为 true 或 false。请修正 .env 并重启应用。")
         self.enable_thinking = None if thinking is None else thinking.lower() == "true"
 
     def complete(self, messages: list[dict]) -> str:
