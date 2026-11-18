@@ -86,6 +86,14 @@ def details(plan: AnalysisPlan, context=LEGACY_CONTEXT) -> CompiledQuery:
     from app.facts import scope_ctes
     ctes, parameters = scope_ctes(plan, context)
     prefix = "WITH " + ",".join(ctes)
+    if context.capabilities and plan.detail_level in {"orders", "items"}:
+        if plan.detail_level == "orders":
+            sql = f"SELECT o.order_id AS entity_id,o.order_id AS entity_name,o.order_id,o.purchase_at,o.order_status,{eligible_sql(context)} AS amount_eligible FROM scoped_orders o ORDER BY o.order_id"
+        else:
+            fields = [f for f in context.capabilities["fields"]["order_items"] if f != "quantity" and (f != "price" or "sales" in context.capabilities["metrics"])]
+            sql = ("SELECT i.order_id||':'||i.order_item_id AS entity_id,i.order_item_id AS entity_name,"
+                   + ",".join("i."+f for f in fields) + f",{eligible_sql(context, 'i')} AS amount_eligible FROM items i ORDER BY i.order_id,i.order_item_id")
+        return CompiledQuery(prefix + " " + sql, tuple(parameters))
     if plan.detail_level == "orders":
         sql = """SELECT o.order_id AS entity_id,o.order_id AS entity_name,o.order_id,o.order_status,o.purchase_at,o.delivered_at,
             o.approved_at,o.shipped_at,o.estimated_delivery_at,c.customer_unique_id,c.customer_state,o.scope_match AS membership_confirmed,

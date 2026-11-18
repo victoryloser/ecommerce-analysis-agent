@@ -28,6 +28,8 @@ def retained_order_records(executor, order_id):
     mapping = json.loads(files["mapping.json"].read_text(encoding="utf-8")) if "mapping.json" in files else None
     records = []
     for table in ("orders", "order_items", "order_payments"):
+        if table not in tables:
+            continue
         spec = mapping["tables"][table] if mapping else None
         filename = spec["file"] if spec else next((name for name in files if name == table + '.csv' or name.endswith('.xlsx')), None)
         sheet = spec.get("sheet") if spec else table if filename and filename.endswith('.xlsx') else None
@@ -35,6 +37,9 @@ def retained_order_records(executor, order_id):
             if str(row.get("order_id")) == order_id:
                 records.append({"table": table, "file": filename, "sheet": sheet,
                     "record_number": number, "locator_kind": "worksheet_row" if sheet else "logical_csv_record", "values": row})
+    if "order_payments" not in tables:
+        return {"order_id": order_id, "records": records, "payment_missing": None,
+                "note": "原始行已核对来源哈希。当前导出未提供支付表。"}
     return {"order_id": order_id, "records": records,
             "payment_missing": not any(r['table'] == 'order_payments' for r in records),
             "note": "逐条回读经过哈希验证的原记录；CSV序号为含表头的逻辑记录，不是物理行号。支付缺失由订单及不存在支付的查询证实。"}

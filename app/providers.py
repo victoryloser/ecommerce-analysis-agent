@@ -7,7 +7,7 @@ from typing import Protocol
 import httpx
 from dotenv import load_dotenv
 
-from app.config import ROOT
+from app.config import INSTANCE_DIR
 
 
 class Provider(Protocol):
@@ -41,7 +41,7 @@ class ChatCompletionsProvider:
     """显式配置的 Chat Completions JSON 协议；没有默认模型和协议探测。"""
 
     def __init__(self):
-        load_dotenv(ROOT / ".env")
+        load_dotenv(INSTANCE_DIR / ".env")
         missing = [name for name in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL") if not os.getenv(name)]
         if missing:
             raise ModelConfigurationError(f"class1/.env 缺少配置：{', '.join(missing)}。请参照 .env.example 补齐后重发原问题。")

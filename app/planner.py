@@ -75,14 +75,19 @@ def make_plan(provider: Provider, manifest: dict, session: Session, question: st
         validate_plan(completed, manifest)
         trace.record("slots_resolved", plan=completed.model_dump(mode="json"))
         return completed, 0
+    from app.model_context import explicit_entities, permitted, question_context, session_context
+    explicit = explicit_entities(manifest, question)
+    directory = catalog(manifest)
+    directory["entities"] = {**directory["entities"], **question_context(question, manifest)}
+    if not permitted("entities"):
+        directory["entities"]["customer_states"] = []
     context = {
-        "catalog": catalog(manifest), "practice_year": manifest["practice"]["year_context"] if practice_context else None,
+        "catalog": directory, "practice_year": manifest["practice"]["year_context"] if practice_context else None,
         "today": datetime.now().date().isoformat(),
-        **session.summary(),
-        "recent_messages": [m for m in session.history if m["role"] == "user"][-4:], "question": question,
+        **session_context(session), "question": question,
     }
     messages = [
-        {"role": "system", "content": INSTRUCTIONS + "\nJSON Schema:\n" + json.dumps(AnalysisPlan.model_json_schema(), ensure_ascii=False)},
+        {"role": "system", "content": INSTRUCTIONS + "\n商家、品类目录仅列出本问题的名称候选，全店汇总和排名由数据库覆盖全部对象。点名无匹配要澄清，不能退为全店或猜ID。\nJSON Schema:\n" + json.dumps(AnalysisPlan.model_json_schema(), ensure_ascii=False)},
         {"role": "user", "content": json.dumps(context, ensure_ascii=False, default=str)},
     ]
     # 仅修正输出结构；语义限制失败直接返回，不让模型绕过限制。
@@ -146,6 +151,17 @@ def make_plan(provider: Provider, manifest: dict, session: Session, question: st
         from app.task_shapes import expand_output
         plan = expand_output(plan)
         plan = apply_result_selection(plan, question, trace)
+        if explicit and plan.intent in {"aggregate", "rank", "compare", "contribution"} and any(
+                word in question for word in ("只看", "仅看", "限定", "限于")):
+            from app.clarification import map_entities
+            bound = set()
+            def collect(field, value, _):
+                bound.add((field, value))
+                return value
+            map_entities(plan, collect)
+            for field, keys in explicit:
+                if not any((field, key) in bound for key in keys):
+                    raise PlanError("指定对象尚未绑定，请确认商家或品类 ID 后重算")
         validate_plan(plan, manifest)
         trace.record("plan_validated", plan=plan.model_dump(mode="json"))
         return plan, trace.model_calls

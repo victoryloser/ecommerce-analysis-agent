@@ -14,8 +14,8 @@ def month_range(year: int, month: int) -> TimeRange:
 
 def entity_values(manifest: dict) -> dict[str, list[tuple[str, str]]]:
     entities = manifest["entities"]
-    return {"category_id": [tuple(r) for r in entities["categories"]],
-            "seller_id": [tuple(r) for r in entities["sellers"]],
+    return {"category_id": [(key, label or key) for key, label in entities["categories"]],
+            "seller_id": [(key, label or key) for key, label in entities["sellers"]],
             "customer_state": [(v, v) for v in entities["customer_states"]]}
 
 
@@ -61,6 +61,13 @@ def bind_entities(plan: AnalysisPlan, manifest: dict, question: str = "") -> Ana
         names[field] = {}
         for key, label in records:
             names[field].setdefault(label.casefold(), []).append((key, label))
+        group = {"seller_id": "sellers", "category_id": "categories"}.get(field)
+        labels = dict(records)
+        for key, aliases in manifest.get("entity_aliases", {}).get(group, {}).items():
+            for alias in aliases:
+                members = names[field].setdefault(alias.casefold(), [])
+                if (key, labels[key]) not in members:
+                    members.append((key, labels[key]))
     ids = {field: dict(records) for field, records in dictionaries.items()}
     ambiguities = []
 
@@ -68,8 +75,14 @@ def bind_entities(plan: AnalysisPlan, manifest: dict, question: str = "") -> Ana
         # 模型替同名实体猜了ID时，恢复为名称，让用户选择。
         if value in ids[field]:
             label = ids[field][value]
+            from app.model_context import mentioned
+            group = {"seller_id": "sellers", "category_id": "categories"}.get(field)
+            for alias in manifest.get("entity_aliases", {}).get(group, {}).get(value, []):
+                if mentioned(alias, question.casefold()) and len(names[field][alias.casefold()]) > 1:
+                    label = alias
+                    break
             same_name = names[field][label.casefold()]
-            if len(same_name) > 1 and label.casefold() in question.casefold() and not any(key in question for key, _ in same_name):
+            if len(same_name) > 1 and mentioned(label, question.casefold()) and not any(mentioned(key, question.casefold()) for key, _ in same_name):
                 value = label
         if value in ids[field]:
             return value
@@ -80,8 +93,8 @@ def bind_entities(plan: AnalysisPlan, manifest: dict, question: str = "") -> Ana
             return value  # SQL条件允许显式的不存在值，如NOT IN。
         if len(matches) == 1:
             return matches[0][0]
-        ambiguities.append((field, matches[0][1], matches))
-        return matches[0][1]
+        ambiguities.append((field, value, matches))
+        return value
 
     bound = map_entities(plan, bind)
     if not ambiguities:
@@ -117,6 +130,11 @@ def resolve_slots(pending: AnalysisPlan | None, question: str) -> AnalysisPlan |
         slot = "year"
     else:
         selected = [c for c in pending.entity_candidates if question.strip() in {c.value, c.label}]
+        ordinal = re.fullmatch(r"(?:刚才|选)?第([1-9][0-9]*|[一二三四五六七八九十])(?:家|个|项)", question.strip())
+        if not selected and ordinal:
+            number = ordinal[1]
+            index = int(number) if number.isdigit() else "一二三四五六七八九十".index(number) + 1
+            selected = pending.entity_candidates[index-1:index]
         if len(selected) != 1:
             return None
         candidate = selected[0]

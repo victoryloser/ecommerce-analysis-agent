@@ -4,12 +4,19 @@ import sqlite3
 import math
 import re
 from collections import Counter
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import DATA_DIR
 from app.models import AnalysisPlan, QueryResult
 from app.session import Session
+
+
+@contextmanager
+def archive_connection(path):
+    with closing(sqlite3.connect(path)) as conn, conn:
+        yield conn
 
 
 def snapshot_identity(manifest: dict) -> dict:
@@ -20,7 +27,7 @@ class SessionStore:
     def __init__(self, path: Path = DATA_DIR / "sessions.sqlite3"):
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(path) as conn:
+        with archive_connection(path) as conn:
             conn.execute("""CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY, dataset_id TEXT NOT NULL, title TEXT NOT NULL,
                 updated_at TEXT NOT NULL, snapshot TEXT NOT NULL, state TEXT NOT NULL)""")
@@ -56,7 +63,7 @@ class SessionStore:
             value = getattr(session, name)
             state[name] = value.model_dump(mode="json") if value else None
         title = (session.transcript[0]["content"] if session.transcript else session.sql_state.get("question", "新会话"))[:60]
-        with sqlite3.connect(self.path) as conn:
+        with archive_connection(self.path) as conn:
             now = datetime.now(timezone.utc).isoformat()
             conn.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET "
                          "title=excluded.title, updated_at=excluded.updated_at, snapshot=excluded.snapshot, state=excluded.state",
@@ -65,7 +72,7 @@ class SessionStore:
             self._index(conn, session.session_id, state, now)
 
     def load(self, session_id: str, manifest: dict) -> Session:
-        with sqlite3.connect(self.path) as conn:
+        with archive_connection(self.path) as conn:
             row = conn.execute("SELECT dataset_id, snapshot, state FROM sessions WHERE session_id=?", (session_id,)).fetchone()
         if row is None:
             raise ValueError("未找到该会话")
@@ -79,7 +86,7 @@ class SessionStore:
         return Session(dataset_id=row[0], session_id=session_id, **state)
 
     def list(self, dataset_id: str) -> list[dict]:
-        with sqlite3.connect(self.path) as conn:
+        with archive_connection(self.path) as conn:
             rows = conn.execute("SELECT session_id, title, updated_at FROM sessions WHERE dataset_id=? ORDER BY updated_at DESC",
                                 (dataset_id,)).fetchall()
         return [dict(zip(("session_id", "title", "updated_at"), row)) for row in rows]
@@ -87,7 +94,7 @@ class SessionStore:
     def turn_evidence(self, session_id: str, turn_index: int, manifest: dict) -> dict | None:
         from app.evidence import read_evidence
         self.load(session_id, manifest)
-        with sqlite3.connect(self.path) as conn:
+        with archive_connection(self.path) as conn:
             row = conn.execute("SELECT evidence_id FROM memories WHERE session_id=? AND turn_index=?",
                                (session_id, turn_index)).fetchone()
         return read_evidence(manifest, session_id, row[0]) if row and row[0] else None
@@ -106,7 +113,7 @@ class SessionStore:
         def tokens(text):
             text = normalize(text)
             return Counter([text[i:i+size] for size in (2, 3) for i in range(max(0, len(text)-size+1))])
-        with sqlite3.connect(self.path) as conn:
+        with archive_connection(self.path) as conn:
             rows = conn.execute("SELECT m.session_id,s.title,m.created_at,m.question,m.answer,m.evidence_id,s.snapshot,m.turn_index "
                                 "FROM memories m JOIN sessions s ON s.session_id=m.session_id WHERE s.dataset_id=?", (manifest["dataset_id"],)).fetchall()
         rows = [r for r in rows if json.loads(r[6]) == snapshot_identity(manifest)

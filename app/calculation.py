@@ -8,6 +8,7 @@ ROUND2_RULE = "round2-order-exclusion-v1"
 @dataclass(frozen=True)
 class CalculationContext:
     rule_version: str = LEGACY_RULE
+    capabilities: dict | None = None
 
     def __post_init__(self):
         if self.rule_version not in {LEGACY_RULE, ROUND2_RULE}:
@@ -20,7 +21,7 @@ class CalculationContext:
     @classmethod
     def from_manifest(cls, manifest):
         # Pre-P0 manifests used the original full-amount semantics.
-        return cls(manifest.get("quality_rule_version") or LEGACY_RULE)
+        return cls(manifest.get("quality_rule_version") or LEGACY_RULE, manifest.get("capabilities"))
 
 
 LEGACY_CONTEXT = CalculationContext()

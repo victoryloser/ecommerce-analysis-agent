@@ -15,7 +15,7 @@ from dotenv import dotenv_values
 from filelock import FileLock
 
 from app.calculation import CalculationContext
-from app.config import ROOT
+from app.config import INSTANCE_DIR
 from app.data_upload import discover, import_upload, suggest_mapping
 from app.executor import Executor
 from app.semantic import PlanError
@@ -31,7 +31,7 @@ def is_delivery_request(question):
 
 
 def delivery_directory(manifest, data_dir):
-    configured = os.environ.get("DATA_DELIVERY_DIR") or dotenv_values(ROOT / ".env").get("DATA_DELIVERY_DIR")
+    configured = os.environ.get("DATA_DELIVERY_DIR") or dotenv_values(INSTANCE_DIR / ".env").get("DATA_DELIVERY_DIR")
     base = Path(configured).expanduser() if configured else data_dir / "incoming"
     return base.resolve() / (manifest.get("delivery_source_id") or manifest["dataset_id"])
 
@@ -62,7 +62,7 @@ def _delivery_mapping(files, manifest, data_dir):
     for table, spec in mapping["tables"].items():
         key = f"{spec['file']}:{spec['sheet']}" if spec["sheet"] else spec["file"]
         source = structure.get(key)
-        if not source or not source["columns"] or not all(field and field in source["columns"] for field in spec["columns"].values()):
+        if not source or not source["columns"] or not all(field in source["columns"] for field in spec["columns"].values() if field):
             raise ValueError(f"请核对 {table} 的交付文件、工作表和字段；字段对应关系有变时可在网页重新映射。")
         used.add(spec["file"])
     extra = {p.name for p in files} - used - {"practice_questions.csv"}
@@ -101,7 +101,7 @@ def _published_delivery(current, directory, data_dir):
                              quality_rule_version=CalculationContext.from_manifest(head).rule_version, change_note="从交付目录同步")
 
 
-def refresh_delivery(agent, session, question):
+def refresh_delivery(agent, session, question, *, allow_target=None):
     source = agent.executors[session.dataset_id]
     data_dir = source.path.parent
     directory = delivery_directory(source.manifest, data_dir)
@@ -113,6 +113,8 @@ def refresh_delivery(agent, session, question):
     except (OSError, ValueError, csv.Error, BadZipFile, DecimalException, duckdb.Error) as error:
         text = f"未完成同步，当前仍使用 {session.dataset_id}。{error}"
     else:
+        if allow_target and not allow_target(target):
+            raise PermissionError("目标快照尚未授权，请联系管理员")
         key = target["dataset_id"]
         if key == session.dataset_id:
             text = f"交付文件与当前快照 {key} 一致，已沿用该版本。"

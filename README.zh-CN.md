@@ -106,9 +106,36 @@ $env:PYTHONUTF8='1'
 | Excel `.xlsx` | 首行为字段名，一张工作表对应一张业务表，可上传一个或多个工作簿 |
 | CSV `.csv` | UTF-8 或 UTF-8 BOM 编码，首行为字段名，一个文件对应一张业务表 |
 
-当前版本按电商经营数据模型进行分析，需要订单、客户、订单商品明细、支付、评价、商品、商家、品类和地理信息共九张业务表。文件名、工作表名和列名可以不同，在导入页面确认对应关系即可。
+导入时可选择完整九表或“订单和商品明细”。轻量模板用两张表计算订单数和商品额，可按实际来源开启运费、品类、商家、支付及评价分析。首次导入请核对状态、币种和行金额定义。两种模板均支持中文列名映射、不可变快照及换版重算。
 
 完整字段、数据类型、主键及关联要求见 [数据格式说明](docs/data-format.md)。文件符合 Excel/CSV 格式后，还需要符合这些业务表结构，系统才能计算已定义的经营指标。
+
+## 团队试用
+
+一个客户对应一个服务进程和专用实例目录。先按“安装与启动”安装依赖。在 PowerShell 中为新实例执行以下命令。实例路径由部署者选定。首次复制示例配置后，将客户自己的模型配置填写到该目录的 `.env`。
+
+```powershell
+$env:ANALYSIS_INSTANCE_DIR = 'D:\analysis-instances\pilot'
+New-Item -ItemType Directory -Force -Path $env:ANALYSIS_INSTANCE_DIR | Out-Null
+Copy-Item .env.example (Join-Path $env:ANALYSIS_INSTANCE_DIR '.env') -NoClobber
+.venv/Scripts/python.exe -m app.team_access admin --role admin
+.venv/Scripts/python.exe -m app.ui --port 7860
+```
+
+在浏览器打开 `http://127.0.0.1:7860`，登录后展开“接入数据”，识别并确认映射。轻量模板可在导入前点击“核对可用指标”，查看当前口径能回答的问题和缺少的来源。导入后，分析员选择快照即可看到对应的示例问题。导入结果显示快照 ID。口令由终端交互输入。可在另一终端设置相同实例目录，使用实际 ID 替换以下示例的 `upload_xxx`。
+
+```powershell
+.venv/Scripts/python.exe -m app.team_access ops --role analyst --feed upload_xxx
+.venv/Scripts/python.exe -m app.team_access finance --role analyst --dataset upload_xxx --grant details --grant export
+.venv/Scripts/python.exe -m app.team_access manager --role reader --dataset upload_xxx
+.venv/Scripts/python.exe -m app.team_access finance --access-only --role analyst --dataset upload_xxx --grant details
+```
+
+- 管理员导入数据及认领本机旧会话。分析员可问答、搜索自己的历史、对比获授权的两个快照、分享当前已核验汇总。读者登录后只可打开指定给自己的汇总。明细、SQL 和完整导出各有独立授权。查询原始表的 SQL 需要同时具备 SQL 和明细权限。
+- `--dataset` 只授权该快照，`--feed` 授权同一交付源的当前及后续版本，两者均可重复指定。授权更新在后续请求及旧链接下载时生效。私人历史按账号、角色和明细及 SQL 授权分开保存。新增快照授权后，原快照中仍获授权的历史可继续使用。
+- 团队成员使用网页入口。对外访问在反向代理终止 HTTPS，后端只监听回环地址。使用企业登录时，由已认证网关重写 `X-Analysis-User` 并注入实例配置的随机 `X-Analysis-Proxy` 凭据，值与 `TEAM_PROXY_SECRET` 一致。网关应清除客户端传入的这两个请求头。账号和授权由实例管理员配置。
+- 每个实例从自己的 `.env` 和进程环境读取模型配置。`TEAM_MODEL_FIELDS` 默认允许当前问题、命中的实体和分析条件，可选 `history` 或 `preview:sales,preview:order_count`。当前问题按原文发送。移除 `question` 可关闭模型问答和 SQL 草稿，手工 SQL 仍可在授权范围执行。
+- 分享报告默认可见 90 天，下载链接默认有效 7 天，操作日志默认保留 30 天，天数可在实例配置中设置。运维记录位于 `data/team.sqlite3` 的 `operations` 表，仅记录路由、状态和耗时。查询证据及业务事件在实例的 `runs/`，源数据和私有会话在 `data/`，由客户按档案期限备份与清理。链接到期只移除访问记录。
 
 ## 使用
 
@@ -122,7 +149,7 @@ $env:PYTHONUTF8='1'
 
 分析结果包含表格、图表和计算依据。点击分组可下钻，返回上层可恢复之前的结果。历史会话支持检索与恢复；新建会话后原有记录仍可访问。
 
-SQL 工作区可查询原始表或上次完整分析结果，支持手工编辑 SQL、生成草稿及导出 CSV。数据上传支持九张业务表的字段映射与独立数据集导入。
+SQL 工作区可查询当前模板映射的原始表或上次完整分析结果，支持手工编辑 SQL、生成草稿及导出 CSV。
 
 命令行入口：
 
@@ -136,7 +163,7 @@ SQL 工作区可查询原始表或上次完整分析结果，支持手工编辑 
 
 默认商品销售额使用已送达订单及下单时间，不含运费。其他状态、日期字段和范围可在查询中指定。指标定义见 [指标口径](docs/metrics.md)。
 
-模型生成结构化分析计划，数据库执行数值计算。自由 SQL 的自定义计算标记为探索结果。数据库为只读查询；更新源文件后停止应用并重新导入。
+模型生成结构化分析计划，数据库执行数值计算。自由 SQL 的自定义计算标记为探索结果。快照以只读方式查询，完整新版交付后可在当前会话输入“数据更新了”重算。
 
 ## 项目结构
 

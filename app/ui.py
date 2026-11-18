@@ -1,13 +1,12 @@
 import argparse
 import json
-import re
 
 import httpx
 
 from app.config import DATASETS, MAX_ROWS
 from app.executor import Executor
 from app.orchestrator import AnalysisAgent
-from app.presentation import present
+from app.presentation import example_questions, present
 from app.answers import STATUS_LABELS
 from app.providers import ChatCompletionsProvider, ModelConfigurationError, model_error_message
 from app.session import Session
@@ -18,23 +17,9 @@ from app.session_store import SessionStore
 from app.sql_workspace import SQLWorkspace, workspace_catalog
 from app.presentation import display_evidence
 from app.charts import numeric_columns, render_charts, CLICK_SCRIPT
-from app.data_upload import registered_datasets, discover, suggest_mapping, import_upload
+from app.data_upload import registered_datasets, inspect_mapping, import_upload
 from app.delivery import is_delivery_request, refresh_delivery
 from app.review_ui import add_review_panel
-
-
-def example_questions(manifest):
-    """示例问题自行写明年份，不依赖用户看不到的演示配置。"""
-    year = manifest["practice"].get("year_context")
-    questions = []
-    for item in manifest["practice"]["questions"]:
-        question = item["question"]
-        if year and "年" not in question:
-            question = re.sub(r"(?<!\d)(\d{1,2})月", rf"{year}年\1月", question)
-        questions.append(question)
-    questions = questions or ["全部数据中，已送达订单的商品销售额是多少？", "按月份查看商品销售额和订单量", "按品类查看商品销售额", "查看延迟率最高的商家"]
-    return questions + ["按品类和商家联合列出全期商品销售额及订单数", "全期每个品类分别按商品销售额列出前三商家，保留并列", "按月份和品类查看全期商品销售额趋势",
-                        "按品类与客户省份联合统计全期商品销售额、运费和订单数"]
 
 
 def build_ui():
@@ -137,7 +122,7 @@ def build_ui():
         return session.transcript, session, session.last_evidence, *result_components(session.last_evidence), archives(session.dataset_id, session.session_id)
 
     def catalog_for_sql(session, dataset_id, scope):
-        return workspace_catalog(current_session(session, dataset_id), scope)
+        return workspace_catalog(current_session(session, dataset_id), scope, executors[dataset_id].manifest)
 
     def draft_sql(question, session, dataset_id, scope):
         session = current_session(session, dataset_id)
@@ -196,13 +181,13 @@ def build_ui():
         from app.metadata import FIELD_MEANINGS, TABLE_GRAINS
         rows = []
         for table, config in json.loads(mapping)["tables"].items():
-            rows.extend([table, field, TABLE_GRAINS[table] + " · " + FIELD_MEANINGS[field], config["file"], config["sheet"] or "", source]
+            rows.extend([table, field, TABLE_GRAINS[table] + " · " + FIELD_MEANINGS.get(field, "数量"), config["file"], config["sheet"] or "", source]
                         for field, source in config["columns"].items())
         return gr.Dataframe(value={"headers": ["业务表", "标准字段", "含义", "来源文件", "工作表（CSV留空）", "来源列名"], "data": rows}, visible=True)
 
     def save_mapping(frame):
         mapping = {"tables": {}}
-        for table, field, _, filename, sheet, source in frame.itertuples(index=False, name=None):
+        for table, field, _, filename, sheet, source in frame.fillna("").itertuples(index=False, name=None):
             config = mapping["tables"].setdefault(table, {"file": filename, "sheet": sheet or None, "columns": {}})
             if config["file"] != filename or config["sheet"] != (sheet or None):
                 raise gr.Error("同一业务表的字段需来自同一文件和工作表。")
@@ -310,17 +295,24 @@ def build_ui():
     def verify_sql(sql, parameters, session, dataset_id, scope):
         return workspace.verify(current_session(session, dataset_id), sql, json.loads(parameters), scope)
 
-    def inspect_upload(files):
-        structure = discover(files)
-        return structure, json.dumps(suggest_mapping(structure), ensure_ascii=False, indent=2)
+    def inspect_upload(files, template="full"):
+        structure, mapping = inspect_mapping(files, template)
+        return structure, json.dumps(mapping, ensure_ascii=False, indent=2)
 
-    def upload_dataset(files, mapping, name, parent=None, note="", origin="uploaded"):
+    def upload_dataset(files, mapping, name, parent=None, note="", origin="uploaded", template="full", amount_mode="line", status_map="{}"):
         version = {"parent_dataset_id": parent, "change_note": note, "data_origin": origin} if parent or note or origin != "uploaded" else {}
-        manifest = import_upload(files, json.loads(mapping), name, **version)
+        mapping = json.loads(mapping)
+        if template == "orders_items":
+            mapping.update(template=template, currency="CNY", amount_mode=amount_mode, status_map=json.loads(status_map))
+        manifest = import_upload(files, mapping, name, **version)
         dataset_id = manifest["dataset_id"]
         datasets[dataset_id] = manifest["name"]
         executors[dataset_id] = Executor(dataset_id)
-        return gr.Dropdown(choices=[(label, key) for key, label in datasets.items()], value=dataset_id), False, f"已导入“{manifest['name']}”，共 {len(manifest['row_counts'])} 张表、{manifest['row_counts'].get('orders', 0)} 笔订单。"
+        from app.answers import label
+        caps = manifest.get("capabilities")
+        abilities = (" 可查指标：" + "、".join(label(m) for m in caps["metrics"]) +
+                     "。扩展所需数据：" + "；".join(dict.fromkeys(caps["missing_inputs"].values()))) if caps else ""
+        return gr.Dropdown(choices=[(label, key) for key, label in datasets.items()], value=dataset_id), False, f"已导入“{manifest['name']}”，共 {len(manifest['row_counts'])} 张表、{manifest['normalized_row_counts']['orders']} 笔订单。" + abilities
 
     def dataset_scope(dataset_id):
         if dataset_id not in executors:
@@ -494,10 +486,13 @@ def build_ui():
                 history_evidence_table = gr.Dataframe(interactive=False, visible=False, datatype="str", label="历史查询结果")
                 history_evidence_download = gr.DownloadButton("下载历史回合依据 JSON", visible=False)
         with gr.Accordion("接入新的Excel/CSV数据", open=initial_dataset is None):
+            template = gr.Radio(choices=[("完整九表", "full"), ("订单和商品明细", "orders_items")], value="full", label="接入模板")
+            amount_mode = gr.Radio(choices=[("行商品额，不含运费", "line"), ("商品单价乘数量", "unit"), ("待确认，仅核对订单", "unknown")], value="line", label="轻量模板金额口径（人民币元）")
+            status_map = gr.Textbox(value="{}", label='轻量模板状态映射，如 {"已送达":"delivered"}')
             gr.Markdown("上传包含订单、客户、商品明细、支付、评价、商品、商家、品类和地理信息的 Excel 或 CSV 文件。先识别文件，再核对字段并导入。新导入按正式复赛金额规则计算：同一明细键出现不同非空商品价时，整单商品额和运费暂不计入，订单仍保留；原始记录完整留存。")
             upload_files = gr.File(file_count="multiple", file_types=[".csv", ".xlsx"], type="filepath", label="数据文件")
             inspect_files = gr.Button("识别文件")
-            upload_structure = gr.JSON(visible=False)
+            upload_structure = gr.JSON(label="识别结果和前三行样本", visible=True)
             upload_mapping = gr.Code(language="json", visible=False)
             upload_fields = gr.Dataframe(label="核对字段对应关系（可修改来源文件、工作表和来源列名）", interactive=True, visible=False, datatype=["str"]*6, column_count=6, static_columns=[0, 1, 2])
             upload_name = gr.Textbox(label="数据集名称")
@@ -556,8 +551,8 @@ def build_ui():
         dataset.change(lambda: gr.Dropdown(choices=[(name, key) for key, name in datasets.items()]), outputs=replay_target)
         dataset.change(lambda: gr.Dropdown(choices=[(name, key) for key, name in datasets.items()], value=None), outputs=upload_parent)
         verify_sql_button.click(verify_sql, [sql_editor, sql_parameters, session, dataset, sql_scope], sql_validation, concurrency_id="analysis")
-        inspect_files.click(inspect_upload, upload_files, [upload_structure, upload_mapping], concurrency_id="analysis")
-        import_files.click(upload_dataset, [upload_files, upload_mapping, upload_name, upload_parent, upload_note, upload_origin], [dataset, practice, upload_status], concurrency_id="analysis")
+        inspect_files.click(inspect_upload, [upload_files, template], [upload_structure, upload_mapping], concurrency_id="analysis")
+        import_files.click(upload_dataset, [upload_files, upload_mapping, upload_name, upload_parent, upload_note, upload_origin, template, amount_mode, status_map], [dataset, practice, upload_status], concurrency_id="analysis")
         history_preview = [history_evidence_scope, history_evidence_table, history_evidence_download]
         history_outputs = [history_record, history_step, *history_preview]
         history_search.click(find_history, [history_query, history_start, history_end, dataset],
@@ -577,6 +572,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=7860)
     args = parser.parse_args()
+    import os
+    if os.environ.get("ANALYSIS_INSTANCE_DIR"):
+        import uvicorn
+        from app.team import create_app
+        uvicorn.run(create_app(), host="127.0.0.1", port=args.port)
+        return
     build_ui().launch(server_name="127.0.0.1", server_port=args.port, inbrowser=False, show_error=True, footer_links=[])
 
 

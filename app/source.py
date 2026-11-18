@@ -33,6 +33,20 @@ FOREIGN_KEYS = [
 ]
 
 
+def mapped_source_rows(path, sheet):
+    if path.suffix.lower() == ".csv":
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            yield from csv.DictReader(handle)
+    else:
+        book = load_workbook(path, read_only=True, data_only=True)
+        try:
+            values = book[sheet].iter_rows(values_only=True)
+            headers = [str(value) for value in next(values)]
+            yield from (dict(zip(headers, row)) for row in values)
+        finally:
+            book.close()
+
+
 def source_files(dataset_id: str) -> list[Path]:
     if dataset_id == "excel_full":
         return [ROOT / "material/ecommerce_agent_demo.xlsx"]

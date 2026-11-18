@@ -4,17 +4,25 @@ from decimal import Decimal
 from collections import defaultdict
 
 from app.source import PRIMARY_KEYS, SCHEMA
+from app.light_import import ITEM_SCHEMA
 
 QUALITY_RULE_VERSION = "p0-amount-v1"
 ISSUE_SCHEMA = {"issue_id": "INTEGER", "table_name": "VARCHAR", "order_id": "VARCHAR",
                 "business_key": "VARCHAR", "field_name": "VARCHAR", "reason": "VARCHAR",
                 "source_rows": "VARCHAR", "candidates": "VARCHAR"}
 QUERY_SCHEMA = {**SCHEMA, "quality_issues": ISSUE_SCHEMA}
+
+
+def query_schema(context):
+    if not context.capabilities:
+        return QUERY_SCHEMA
+    return {**{t: ITEM_SCHEMA if t == "order_items" else SCHEMA[t] for t in context.capabilities["fields"]},
+            "quality_issues": ISSUE_SCHEMA}
 AMOUNT_FIELDS = {"order_items": {"price", "freight_value"}, "order_payments": {"payment_value"}}
 
 
-def normalize_rows(table, rows):
-    columns = list(SCHEMA[table])
+def normalize_rows(table, rows, fields=None, supplied=None):
+    columns = list(fields or SCHEMA[table])
     keys = [columns.index(key) for key in PRIMARY_KEYS[table]]
     grouped = defaultdict(list)
     for number, row in enumerate(rows, 2):
@@ -36,7 +44,7 @@ def normalize_rows(table, rows):
                     raise ValueError(f"{table} {key} 的 {field} 冲突；当前规则仅归并金额冲突")
                 merged[index] = None
                 issue(field, "amount_conflict")
-            elif merged[index] is None and field in AMOUNT_FIELDS.get(table, set()):
+            elif merged[index] is None and field in AMOUNT_FIELDS.get(table, set()) and (supplied is None or field in supplied):
                 issue(field, "missing_value")
         normalized.append(merged)
     return normalized, issues

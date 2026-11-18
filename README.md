@@ -112,7 +112,9 @@ Business data, sample datasets, databases, and conversation history are not dist
 | Excel `.xlsx` | Column names in the first row; one business table per worksheet; one or more workbooks |
 | CSV `.csv` | UTF-8 or UTF-8 BOM encoding; column names in the first row; one business table per file |
 
-The current version uses an ecommerce data model with nine business tables: orders, customers, order items, payments, reviews, products, sellers, categories, and geolocation. File names, worksheet names, and column names may differ; confirm their mappings during import.
+Choose the nine-table competition model or the order-and-line-item template. The latter supports order counts and confirmed CNY line amounts, with optional freight, category, seller, payment and review inputs. Column and worksheet names can be mapped during import.
+
+For a team pilot, set `ANALYSIS_INSTANCE_DIR` to a dedicated customer directory, place the model configuration in that directory's `.env`, provision a local administrator with `python -m app.team_access admin --role admin`, and launch `python -m app.ui`. Each process serves one instance. The team entry supports per-user dataset, evidence and download permissions and an authenticated reverse proxy. [Team deployment instructions](README.zh-CN.md#团队试用)
 
 See the [data format specification (Chinese)](docs/data-format.md) for all fields, types, primary keys, and relationships. Files must satisfy both the file format and business schema requirements for the defined metrics to work.
 

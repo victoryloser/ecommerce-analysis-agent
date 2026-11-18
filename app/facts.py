@@ -10,6 +10,7 @@ from app.grouping import dimensions, entity_sql, joint_projection, result_column
 def scope_ctes(plan, context=LEGACY_CONTEXT):
     params = [*plan.order_statuses, plan.time_range.start, plan.time_range.end]
     conditions = [f"COALESCE((o.order_status IN ({','.join('?' for _ in plan.order_statuses)}) AND o.{plan.time_field}>=? AND o.{plan.time_field}<?),FALSE)"]
+    item_fields = {**ITEM_FIELDS, "category_id": "i.category_id"} if context.capabilities else ITEM_FIELDS
     for f in plan.filters:
         if f.field == "customer_state":
             conditions.append(f"c.customer_state IN ({','.join('?' for _ in f.values)})")
@@ -24,20 +25,24 @@ def scope_ctes(plan, context=LEGACY_CONTEXT):
     item_conditions = []
     for f in plan.filters:
         if f.field != "customer_state":
-            item_conditions.append(f"{ITEM_FIELDS[f.field]} IN ({','.join('?' for _ in f.values)})")
+            item_conditions.append(f"{item_fields[f.field]} IN ({','.join('?' for _ in f.values)})")
             params.extend(f.values)
-    item_sql, values = predicate_sql(plan.item_where, ITEM_FIELDS)
+    item_sql, values = predicate_sql(plan.item_where, item_fields)
     params.extend(values)
     if item_sql:
         item_conditions.append(f"({item_sql})")
     item_match = " AND ".join(item_conditions) or "TRUE"
-    ctes = [f"""order_candidates AS (SELECT o.*,c.customer_unique_id,c.customer_state,
-        ({' AND '.join(conditions)}) AS order_match FROM orders o JOIN customers c ON c.customer_id=o.customer_id)""",
+    customer_columns = "" if context.capabilities else ",c.customer_unique_id,c.customer_state"
+    customer_join = "" if context.capabilities else "JOIN customers c ON c.customer_id=o.customer_id"
+    item_columns = "" if context.capabilities else ",p.category_id,cat.category_name_zh,s.seller_name"
+    item_joins = "" if context.capabilities else """JOIN products p ON p.product_id=i.product_id
+        JOIN categories cat ON cat.category_id=p.category_id JOIN sellers s ON s.seller_id=i.seller_id"""
+    ctes = [f"""order_candidates AS (SELECT o.*{customer_columns},
+        ({' AND '.join(conditions)}) AS order_match FROM orders o {customer_join})""",
         "eligible_orders AS (SELECT * FROM order_candidates WHERE order_match IS NOT FALSE)",
-        f"""item_candidates AS (SELECT i.*,p.category_id,cat.category_name_zh,s.seller_name,
+        f"""item_candidates AS (SELECT i.*{item_columns},
         ({item_match}) AS item_match FROM order_items i JOIN eligible_orders o ON o.order_id=i.order_id
-        JOIN products p ON p.product_id=i.product_id JOIN categories cat ON cat.category_id=p.category_id
-        JOIN sellers s ON s.seller_id=i.seller_id)""",
+        {item_joins})""",
         "items AS (SELECT * FROM item_candidates WHERE item_match IS NOT FALSE)"]
     exists = """(SELECT CASE WHEN COUNT(*) FILTER (WHERE i.item_match)>0 THEN TRUE
         WHEN COUNT(*) FILTER (WHERE i.item_match IS NULL)>0 THEN NULL ELSE FALSE END
@@ -91,24 +96,29 @@ def aggregate(plan: AnalysisPlan, context=LEGACY_CONTEXT) -> CompiledQuery:
         CASE WHEN COUNT(*) FILTER (WHERE item_match)>0 THEN TRUE
              WHEN COUNT(*) FILTER (WHERE item_match IS NULL)>0 THEN NULL ELSE FALSE END AS group_match
         FROM items GROUP BY order_id{entity_group})""")
-    ctes.append(f"""payments AS (SELECT order_id,SUM(payment_value) AS payment_known,
+    payment_fields = ""
+    payment_join = ""
+    if "payment_amount" in plan.metric_ids:
+        ctes.append(f"""payments AS (SELECT order_id,SUM(payment_value) AS payment_known,
         COUNT(payment_value) AS payment_known_count, COUNT(*)-COUNT(payment_value) AS payment_unknown,
         {exact_sum('payment_value')} AS payment_amount FROM order_payments GROUP BY order_id)""")
+        payment_fields = ",pay.payment_known,pay.payment_known_count,pay.payment_unknown,(pay.order_id IS NULL) AS payment_missing"
+        payment_join = "LEFT JOIN payments pay ON pay.order_id=o.order_id"
     key, name = entity_sql(plan)
     entity = ",".join([f"{key} AS entity_id", f"{name} AS entity_name", *joint_projection(plan)])
     match = "o.scope_match AND i.group_match" if grouped_items else "o.scope_match"
     reviews = bool(set(plan.metric_ids) & {"avg_review", "low_score_rate"})
     order_fields = "o.* EXCLUDE (customer_state)" if plan.group_by and "customer_state" in dims else "o.*"
+    missing_items = "1" if context.capabilities else "0"
     ctes.append(f"""facts AS (SELECT {order_fields},{entity},({match}) AS match_state,
         COALESCE(i.sales_known,0) AS sales_known,COALESCE(i.sales_known_count,0) AS sales_known_count,
-        COALESCE(i.sales_unknown,0) AS sales_unknown,COALESCE(i.item_unknown,0) AS item_unknown,
+        COALESCE(i.sales_unknown,{missing_items}) AS sales_unknown,COALESCE(i.item_unknown,0) AS item_unknown,
         COALESCE(i.freight_known,0) AS freight_known,COALESCE(i.freight_known_count,0) AS freight_known_count,
-        COALESCE(i.freight_unknown,0) AS freight_unknown,
-        {eligible_sql(context)} AS amount_eligible,
-        pay.payment_known,pay.payment_known_count,pay.payment_unknown,(pay.order_id IS NULL) AS payment_missing
+        COALESCE(i.freight_unknown,{missing_items}) AS freight_unknown,
+        {eligible_sql(context)} AS amount_eligible{payment_fields}
         {',r.review_score' if reviews else ''}
         FROM scoped_orders o {'JOIN' if grouped_items else 'LEFT JOIN'} entity_items i ON i.order_id=o.order_id
-        LEFT JOIN payments pay ON pay.order_id=o.order_id
+        {payment_join}
         {'LEFT JOIN order_reviews r ON r.order_id=o.order_id' if reviews else ''})""")
     group_columns = ["entity_id", "entity_name", *result_columns(plan)]
     group = "GROUP BY " + ",".join(group_columns) if dims else ""

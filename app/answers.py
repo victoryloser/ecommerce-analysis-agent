@@ -216,6 +216,8 @@ def advanced_answer(plan: AnalysisPlan, result: QueryResult, manifest: dict) -> 
                         "seller_outlier": f"标出延迟率高于商家平均值{threshold if threshold is not None else 2}个标准差的商家；均值不按订单量加权，订单门槛{plan.min_group_count}。"}
         notes.append(descriptions[plan.diagnosis])
         notes.append("这是数据偏离或对账线索，不能据此确认促销、欺诈等业务原因。")
+    elif plan.intent == "details" and manifest.get("capabilities"):
+        notes.append("这些记录来自当前轻量快照。可按订单号查验留存的来源行，金额资格按该快照绑定的规则确定。")
     elif plan.intent == "details":
         notes.append("订单金额是完整订单合计；明细筛选用于选择订单或明细，不将整单支付分摊到商品。")
     if plan.comparison_range:

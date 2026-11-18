@@ -489,8 +489,8 @@ class AnalysisAgent:
             from app.semantic import validate_plan
             validate_plan(plan, executor.manifest)
             compiled = compile_query(plan, executor.context)
-            from app.quality import QUERY_SCHEMA
-            validate_sql(compiled.sql, schema=QUERY_SCHEMA, exploration=extended(plan))
+            from app.quality import query_schema
+            validate_sql(compiled.sql, schema=query_schema(executor.context), exploration=extended(plan))
             audit_query(plan, compiled, executor.context)
         else:
             raise PlanError("请先执行查询再导出")

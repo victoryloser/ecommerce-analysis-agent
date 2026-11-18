@@ -1,6 +1,7 @@
 """表格、图表和导出共用当前查询证据，不重复查询或调用模型。"""
 import csv
 import json
+import re
 from datetime import date
 from dataclasses import dataclass, field
 
@@ -8,6 +9,25 @@ from app.answers import LABELS, cell, label, plan_label
 from app.config import RUNS_DIR
 from app.models import AnalysisPlan, QueryResult
 from app.grouping import dimensions
+
+
+def example_questions(manifest):
+    """示例问题自行写明年份，不依赖用户看不到的演示配置。"""
+    if manifest.get("capabilities"):
+        questions = ["全期已送达订单数是多少？"]
+        if "sales" in manifest["capabilities"]["metrics"]:
+            questions.append("按月查看全期已送达订单数及商品额")
+        return questions
+    year = manifest["practice"].get("year_context")
+    questions = []
+    for item in manifest["practice"]["questions"]:
+        question = item["question"]
+        if year and "年" not in question:
+            question = re.sub(r"(?<!\d)(\d{1,2})月", rf"{year}年\1月", question)
+        questions.append(question)
+    questions = questions or ["全部数据中，已送达订单的商品销售额是多少？", "按月份查看商品销售额和订单量", "按品类查看商品销售额", "查看延迟率最高的商家"]
+    return questions + ["按品类和商家联合列出全期商品销售额及订单数", "全期每个品类分别按商品销售额列出前三商家，保留并列", "按月份和品类查看全期商品销售额趋势",
+                        "按品类与客户省份联合统计全期商品销售额、运费和订单数"]
 
 
 @dataclass

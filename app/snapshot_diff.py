@@ -11,7 +11,7 @@ import duckdb
 
 from app.models import AnalysisPlan
 from app.calculation import CalculationContext, LEGACY_CONTEXT, eligible_sql
-from app.quality import QUERY_SCHEMA, decode_metric_quality
+from app.quality import decode_metric_quality, query_schema
 from app.snapshots import canonical, quality_signature
 from app.source import SCHEMA, PRIMARY_KEYS
 from app.sql_compiler import compile_query
@@ -36,8 +36,8 @@ ORDER_PROJECTION = """WITH i AS (
     FROM orders o LEFT JOIN i ON i.order_id=o.order_id LEFT JOIN p ON p.order_id=o.order_id ORDER BY o.order_id"""
 
 
-def rows(conn, sql, parameters, statements):
-    validate_sql(sql, schema=QUERY_SCHEMA, exploration=True)
+def rows(conn, sql, parameters, statements, context=LEGACY_CONTEXT):
+    validate_sql(sql, schema=query_schema(context), exploration=True)
     statements.append({"sql": sql, "parameters": parameters})
     cursor = conn.cursor().execute(sql, parameters)
     columns = [c[0] for c in cursor.description]
@@ -75,7 +75,7 @@ def read_analysis(conn, plan, statements, context=LEGACY_CONTEXT):
     compiled = compile_query(plan, context)
     audit_query(plan, compiled, context)
     result = []
-    for row in rows(conn, compiled.sql, compiled.parameters, statements):
+    for row in rows(conn, compiled.sql, compiled.parameters, statements, context):
         raw = row.pop("__quality", "{}")
         row["quality"] = decode_metric_quality(raw)
         result.append(row)
@@ -121,9 +121,9 @@ def member_projection(plan, metric, context=LEGACY_CONTEXT):
     return "WITH " + ",".join(ctes) + " " + sql, parameters
 
 
-def review_samples(conn, plan, statements):
+def review_samples(conn, plan, statements, context=LEGACY_CONTEXT):
     from app.facts import scope_ctes
-    ctes, parameters = scope_ctes(plan)
+    ctes, parameters = scope_ctes(plan, context)
     entity, _ = entity_sql(plan)
     if set(dimensions(plan)) & {"category", "seller"}:
         ctes.append(f"groups AS (SELECT i.order_id,{entity} AS entity_id,CASE WHEN COUNT(*) FILTER (WHERE item_match)>0 THEN TRUE WHEN COUNT(*) FILTER (WHERE item_match IS NULL)>0 THEN NULL ELSE FALSE END AS member FROM items i JOIN scoped_orders o ON o.order_id=i.order_id GROUP BY i.order_id,entity_id)")
@@ -135,14 +135,14 @@ def review_samples(conn, plan, statements):
         SUM(r.review_score) FILTER (WHERE {member}) AS score_sum,
         COUNT(*) FILTER (WHERE ({member}) AND r.review_score<=2) AS low_score_orders
         FROM scoped_orders o {join} LEFT JOIN order_reviews r ON r.order_id=o.order_id GROUP BY entity_id"""
-    return {r["entity_id"]: r for r in rows(conn, sql, parameters, statements)}
+    return {r["entity_id"]: r for r in rows(conn, sql, parameters, statements, context)}
 
 
 def compare_members(conns, plans, metric, statements, emit, period, order_sets, contexts):
     members = []
     for conn, plan, log, context in zip(conns, plans, statements, contexts):
         sql, params = member_projection(plan, metric, context)
-        members.append({canonical([r["order_id"], r["order_item_id"], r["entity_id"]]): r for r in rows(conn, sql, params, log)})
+        members.append({canonical([r["order_id"], r["order_item_id"], r["entity_id"]]): r for r in rows(conn, sql, params, log, context)})
     summaries = {}
     for key in sorted(members[0].keys() | members[1].keys()):
         a, b = members[0].get(key), members[1].get(key)
@@ -220,9 +220,13 @@ def compare_snapshots(paths, plans, directory, comparable=True):
                 report["preview"].append(record)
         for table in SCHEMA:
             keys = PRIMARY_KEYS[table]
+            mixed_item_key = table == "order_items" and bool(contexts[0].capabilities) != bool(contexts[1].capabilities)
             sql = f"SELECT * FROM {table} ORDER BY {','.join(keys)}"
+            if mixed_item_key:
+                sql = "SELECT * REPLACE(CAST(order_item_id AS VARCHAR) AS order_item_id) FROM order_items ORDER BY order_id,CAST(order_item_id AS VARCHAR)"
             summary = {"added": 0, "removed": 0, "changed": 0, "unchanged": 0, "fields": {}}
-            sources = [rows(conn, sql, [], log) for conn, log in zip(conns, statements)]
+            sources = [rows(conn, sql, [], log, ctx) if table in query_schema(ctx) else iter(())
+                       for conn, log, ctx in zip(conns, statements, contexts)]
             for key, a, b in aligned(*sources, key=lambda r: tuple(r[k] for k in keys)):
                 if table == "orders":
                     for index, record in enumerate((a, b)):
@@ -233,7 +237,8 @@ def compare_snapshots(paths, plans, directory, comparable=True):
                     continue
                 kind = change_kind(a, b)
                 summary[kind] += 1
-                changed = [field for field in SCHEMA[table] if a is None or b is None or a[field] != b[field]]
+                changed = [field for field in dict.fromkeys([*(a or {}), *(b or {})])
+                           if a is None or b is None or a.get(field) != b.get(field)]
                 for field in changed:
                     summary["fields"][field] = summary["fields"].get(field, 0) + 1
                 if table == "order_items" and a and b and set(changed) & {"price", "freight_value"}:
@@ -258,7 +263,18 @@ def compare_snapshots(paths, plans, directory, comparable=True):
         business = {"changed_orders": 0, "unknown_orders": 0, "payment_equivalent": True, "payment_projection_equal": True,
                     "revised_item_orders": len(revised_orders), "revised_item_keys": len(revised_items),
                     "payment_revision_mismatch": 0, "amount_revision_only": True}
-        sources = [rows(conn, ORDER_PROJECTION, [], log) for conn, log in zip(conns, statements)]
+        sources = []
+        for conn, log, ctx in zip(conns, statements, contexts):
+            sql = ORDER_PROJECTION
+            if "order_payments" not in query_schema(ctx):
+                sql = """WITH i AS (SELECT order_id,SUM(price) AS sales_known,
+                    CASE WHEN COUNT(price)=COUNT(*) THEN SUM(price) END AS sales,
+                    CASE WHEN COUNT(freight_value)=COUNT(*) THEN SUM(freight_value) END AS freight
+                    FROM order_items GROUP BY order_id)
+                    SELECT o.order_id,o.purchase_at,o.order_status,i.sales,i.freight,i.sales_known,
+                    NULL AS payment_amount,NULL AS payment_known,NULL AS payment_missing
+                    FROM orders o LEFT JOIN i ON i.order_id=o.order_id ORDER BY o.order_id"""
+            sources.append(rows(conn, sql, [], log, ctx))
         for key, a, b in aligned(*sources, key=lambda r: r["order_id"]):
             if a is None or b is None or any(a[field] != b[field] for field in ("payment_amount", "payment_known", "payment_missing")):
                 business["payment_projection_equal"] = False
@@ -296,8 +312,8 @@ def compare_snapshots(paths, plans, directory, comparable=True):
             if not metrics:
                 continue
             results = [read_analysis(conn, p, log, context) for conn, p, log, context in zip(conns, current_plans, statements, contexts)]
-            sample_maps = [review_samples(conn, p, log) if set(metrics) & {"avg_review", "low_score_rate"} else {}
-                           for conn, p, log in zip(conns, current_plans, statements)]
+            sample_maps = [review_samples(conn, p, log, ctx) if set(metrics) & {"avg_review", "low_score_rate"} else {}
+                           for conn, p, log, ctx in zip(conns, current_plans, statements, contexts)]
             by_key = [{canonical(r.get("entity_id", "all")): r for r in result} for result in results]
             memberships = {m: compare_members(conns, current_plans, m, statements, emit, role, order_sets, contexts) for m in metrics if m in {"sales", "freight", "payment_amount", "order_count"}}
             for key in sorted(by_key[0].keys() | by_key[1].keys()):
@@ -346,6 +362,8 @@ def compare_snapshots(paths, plans, directory, comparable=True):
                 "revision_effect": left, "revision_difference": right, "verified": left == right if valid else None})
         business["d2_equivalent"] = business["d2_equivalent"] and comparable and bool(report["metric_comparisons"]) and all(r[side]["state"] != "unknown" for r in report["metric_comparisons"] for side in ("before", "after"))
         business["d2_equivalent"] = business["d2_equivalent"] and all(r["before"]["value"] == r["after"]["value"] for r in report["metric_comparisons"])
+        if any("order_payments" not in query_schema(ctx) for ctx in contexts):
+            business.update(d2_equivalent=False, payment_equivalent=None, payment_projection_equal=None)
     report.update(elapsed_ms=round((time.perf_counter()-started)*1000), statements=statements,
                   sql_counts=[len(log) for log in statements], csv_file=str(directory / "differences.csv"))
     (directory / "diff.json").write_text(json.dumps(report, ensure_ascii=False, default=str, indent=2), encoding="utf-8")

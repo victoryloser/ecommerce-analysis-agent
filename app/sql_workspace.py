@@ -15,7 +15,7 @@ from app.models import Contract, QueryResult
 from app.query_worker import run_query
 from app.semantic import METRICS, RELATIONSHIPS, validate_plan
 from app.source import SCHEMA
-from app.quality import QUERY_SCHEMA
+from app.quality import query_schema
 from app.sql_audit import audit_query
 from app.sql_compiler import CompiledQuery, compile_query
 from app.sql_guard import EXPLORATION_FUNCTIONS, validate_sql
@@ -29,8 +29,15 @@ class SQLDraft(Contract):
     explanation: str
 
 
-def workspace_catalog(session, scope: Scope) -> dict:
+def workspace_catalog(session, scope: Scope, manifest=None) -> dict:
     if scope == "raw":
+        if manifest and manifest.get("capabilities"):
+            from app.calculation import CalculationContext
+            caps = manifest["capabilities"]
+            schema = query_schema(CalculationContext.from_manifest(manifest))
+            return {"scope": scope, "metrics": caps["metrics"], "tables": {
+                t: {"fields": {k: {"type": schema[t][k]} for k in fields if k in schema[t] and
+                              (k != "price" or "sales" in caps["metrics"])}} for t, fields in caps["fields"].items()}}
         return {"scope": scope, "tables": {table: table_detail(table) for table in SCHEMA},
                 "metrics": METRICS, "relationships": RELATIONSHIPS}
     if scope != "analysis_result":
@@ -47,20 +54,26 @@ def workspace_catalog(session, scope: Scope) -> dict:
 def compile_exploration(session, executor, sql: str, parameters: list, scope: Scope) -> tuple[CompiledQuery, dict]:
     if not isinstance(parameters, list) or any(isinstance(value, (dict, list)) for value in parameters):
         raise ValueError("绑定参数必须是标量值组成的JSON数组")
-    catalog = workspace_catalog(session, scope)
+    catalog = workspace_catalog(session, scope, executor.manifest)
+    schema = query_schema(executor.context)
     catalog["quality_rule_version"] = executor.context.rule_version
     if scope == "raw":
-        validate_sql(sql, exploration=True)
+        raw_schema = {t: {f: d["type"] for f, d in table["fields"].items()} for t, table in catalog["tables"].items()}
+        validate_sql(sql, schema=raw_schema, exploration=True)
+        if executor.context.capabilities:
+            # Expand stars to the mapped fields before DuckDB sees the physical table.
+            tree = qualify(sqlglot.parse_one(sql, read="duckdb"), dialect="duckdb", schema=raw_schema)
+            return CompiledQuery(tree.sql(dialect="duckdb"), tuple(parameters)), catalog
         return CompiledQuery(sqlglot.parse_one(sql, read="duckdb").sql(dialect="duckdb"), tuple(parameters)), catalog
     plan = session.last_successful_plan
     validate_plan(plan, executor.manifest)
     base = compile_query(plan, executor.context)
     from app.advanced import extended
-    validate_sql(base.sql, schema=QUERY_SCHEMA, exploration=extended(plan))
+    validate_sql(base.sql, schema=schema, exploration=extended(plan))
     audit_query(plan, base, executor.context)
     # 用完整查询作CTE，不能把500行预览误作全量输入。
     base_tree = sqlglot.parse_one(base.sql, read="duckdb")
-    qualified = qualify(base_tree.copy(), dialect="duckdb", schema=QUERY_SCHEMA, quote_identifiers=False, identify=False)
+    qualified = qualify(base_tree.copy(), dialect="duckdb", schema=schema, quote_identifiers=False, identify=False)
     schema = {"analysis_result": {name: "UNKNOWN" for name in qualified.named_selects}}
     validate_sql(sql, schema=schema, exploration=True)
     tree = sqlglot.parse_one(sql, read="duckdb")
@@ -85,7 +98,16 @@ class SQLWorkspace:
         self.store = store
 
     def draft(self, session, question: str, scope: Scope, provider) -> SQLDraft:
-        catalog = workspace_catalog(session, scope)
+        from app.model_context import question_context, permitted
+        manifest = self.executors[session.dataset_id].manifest
+        catalog = workspace_catalog(session, scope, manifest)
+        source_record_id = catalog.get("source_record_id")
+        catalog["entities"] = question_context(question, manifest)
+        if not permitted("scope"):
+            for key in ("working_plan", "source_plan", "source_record_id"):
+                catalog.pop(key, None)
+        if not permitted("quality"):
+            catalog.pop("quality", None)
         with TurnTrace(session.session_id, session.dataset_id, question, provider.model) as trace:
             messages = [{"role": "system", "content":
                 "你是DuckDB只读SQL助手。输出符合JSON Schema的sql和explanation，不执行SQL，不编造数值。"
@@ -106,7 +128,7 @@ class SQLWorkspace:
                 compile_exploration(session, self.executors[session.dataset_id], draft.sql, [], scope)
             trace.record("sql_draft", scope=scope, **draft.model_dump())
             session.sql_state = {**draft.model_dump(), "parameters": [], "scope": scope, "question": question,
-                                 "source_record_id": catalog.get("source_record_id")}
+                                 "source_record_id": source_record_id}
             if self.store:
                 self.store.save(session, self.executors[session.dataset_id].manifest)
             return draft
@@ -144,11 +166,12 @@ class SQLWorkspace:
         plan = session.last_successful_plan
         validate_plan(plan, executor.manifest)
         expected = compile_query(plan, executor.context)
-        validate_sql(expected.sql, schema=QUERY_SCHEMA, exploration=extended(plan))
+        schema = query_schema(executor.context)
+        validate_sql(expected.sql, schema=schema, exploration=extended(plan))
         audit_query(plan, expected, executor.context)
         actual, _ = compile_exploration(session, executor, sql, parameters, scope)
-        expected_tree = qualify(sqlglot.parse_one(expected.sql, read="duckdb"), dialect="duckdb", schema=QUERY_SCHEMA, quote_identifiers=False, identify=False)
-        actual_tree = qualify(sqlglot.parse_one(actual.sql, read="duckdb"), dialect="duckdb", schema=QUERY_SCHEMA, quote_identifiers=False, identify=False)
+        expected_tree = qualify(sqlglot.parse_one(expected.sql, read="duckdb"), dialect="duckdb", schema=schema, quote_identifiers=False, identify=False)
+        actual_tree = qualify(sqlglot.parse_one(actual.sql, read="duckdb"), dialect="duckdb", schema=schema, quote_identifiers=False, identify=False)
         if expected_tree.named_selects != actual_tree.named_selects:
             raise ValueError("核对要求输出列及顺序与参考分析一致")
         query = CompiledQuery(f"""WITH reference AS ({expected.sql}), candidate AS ({actual.sql}),

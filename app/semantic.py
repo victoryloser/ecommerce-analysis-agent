@@ -31,6 +31,8 @@ RELATIONSHIPS = [
 def metadata_hash(context=LEGACY_CONTEXT) -> str:
     content = {"version": METADATA_VERSION, "schema": {t: table_detail(t) for t in SCHEMA},
                "metrics": {m: metric_detail(m, context) for m in METRICS}, "relationships": RELATIONSHIPS}
+    if context.capabilities:
+        content["capabilities"] = context.capabilities
     return hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
@@ -44,7 +46,7 @@ def load_manifest(dataset_id: str, data_dir: Path = DATA_DIR) -> dict:
 
 def catalog(manifest: dict) -> dict:
     context = CalculationContext.from_manifest(manifest)
-    return {
+    result = {
         "quality_rule_version": context.rule_version, "effective_metadata_sha256": metadata_hash(context),
         "dataset_id": manifest["dataset_id"], "metadata_version": manifest["metadata_version"],
         "coverage": manifest["coverage"], "metrics": {m: {"summary": description, **metric_detail(m, context, include_regional=True)} for m, description in METRICS.items()},
@@ -68,6 +70,12 @@ def catalog(manifest: dict) -> dict:
             "joint_analysis": "category+seller、month+category支持金额、订单、履约与评价；category+customer_state支持商品额、运费、订单数。含month仅汇总/排名；禁止分摊支付和联合复购。可按品类排名或计算品类内金额贡献。",
         },
     }
+    if context.capabilities:
+        caps = context.capabilities
+        result.update(dimensions=caps["dimensions"], metrics={m: result["metrics"][m] for m in caps["metrics"]},
+                      capabilities=caps, relationships=["订单和各类明细按 order_id 关联，商品额按明细计算"],
+                      joint_groups=[g for g in JOINT_GROUPS if set(g) <= set(caps["dimensions"])])
+    return result
 
 
 def get_catalog(manifest: dict, plan: AnalysisPlan) -> dict:
@@ -82,10 +90,13 @@ def get_catalog(manifest: dict, plan: AnalysisPlan) -> dict:
         tables.update({"orders", "order_items", "order_payments"})
     if plan.intent in {"details", "diagnose"}:
         tables.update(SCHEMA)
+    if context.capabilities:
+        tables = (tables & context.capabilities["fields"].keys()) | {"orders", "order_items"}
     result = {"dataset_id": manifest["dataset_id"], "metadata_version": manifest["metadata_version"],
             "metadata_sha256": manifest["metadata_sha256"],
             "quality_rule_version": context.rule_version, "effective_metadata_sha256": metadata_hash(context),
-            "metrics": {m: metric_detail(m, context, include_regional=True) for m in plan.metric_ids},
+            "metrics": {m: metric_detail(m, context, include_regional=True) for m in plan.metric_ids
+                        if not context.capabilities or m in context.capabilities["metrics"]},
             "tables": {t: table_detail(t) for t in sorted(tables)}, "relationships": RELATIONSHIPS}
     result["applied_scope"] = {"time_field": plan.time_field, "order_statuses": plan.order_statuses,
                                "group_by": list(dimensions(plan)), "grouping_version": "joint-v2" if dimensions(plan) == REGIONAL_GROUP else "joint-v1",
@@ -97,6 +108,15 @@ def get_catalog(manifest: dict, plan: AnalysisPlan) -> dict:
         metric["time_field"] = "orders." + plan.time_field
     if "orders" in result["tables"]:
         result["tables"]["orders"]["fields"]["order_status"]["meaning"] = "本次查询选定状态：" + ",".join(plan.order_statuses)
+    if context.capabilities:
+        result["capabilities"] = context.capabilities
+        result["relationships"] = ["明细的 order_id 对应订单主键"]
+        from app.quality import query_schema
+        schema = query_schema(context)
+        for name, desc in result["tables"].items():
+            desc["fields"] = {f: {**desc["fields"].get(f, {"meaning": f}), "type": schema[name][f]}
+                              for f in context.capabilities["fields"][name] if f in schema[name]}
+            desc["relationships"] = [r for r in desc["relationships"] if r["target"].split(".")[0] in tables]
     return result
 
 
@@ -113,6 +133,8 @@ def validate_workflow(plan: AnalysisPlan, manifest: dict) -> None:
 
 
 def validate_plan(plan: AnalysisPlan, manifest: dict, *, allow_binding=False) -> None:
+    from app.team_access import check_team_plan
+    check_team_plan(plan)
     CalculationContext.from_manifest(manifest)
     if plan.dataset_id != manifest["dataset_id"] or plan.metadata_version != manifest["metadata_version"]:
         raise PlanError("计划的数据集或元数据版本与当前会话不一致")
@@ -181,6 +203,12 @@ def validate_plan(plan: AnalysisPlan, manifest: dict, *, allow_binding=False) ->
         return
     if plan.time_range is None:
         raise PlanError("缺少统计时间范围，请补充年份和期间")
+    if manifest.get("capabilities"):
+        from app.light_import import validate_capabilities
+        try:
+            validate_capabilities(plan, manifest["capabilities"])
+        except ValueError as error:
+            raise PlanError(str(error)) from error
     if plan.intent == "join_example":
         if plan.metric_ids or plan.filters or plan.dimension != "total" or plan.time_field != "purchase_at" or plan.order_statuses != ["delivered"] or plan.order_where or plan.item_where:
             raise PlanError("真实关联示例只支持指定期间的订单示例，不附加指标或实体过滤")

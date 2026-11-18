@@ -35,7 +35,9 @@ def quality_signature(row):
     normalized = []
     for candidate in candidates:
         values = []
-        for value, kind in zip(candidate, SCHEMA[row["table_name"]].values()):
+        kinds = list(SCHEMA[row["table_name"]].values())
+        for index, value in enumerate(candidate):
+            kind = kinds[index] if index < len(kinds) else "VARCHAR"
             if value is not None and kind.startswith("DECIMAL"):
                 value = Decimal(str(value))
             elif value is not None and kind == "TIMESTAMP":
@@ -46,10 +48,10 @@ def quality_signature(row):
             "duplicate_rows": len(json.loads(row["source_rows"])) - len(candidates) if row["reason"] == "exact_duplicate" else 0}
 
 
-def table_fingerprints(conn):
+def table_fingerprints(conn, schema=None):
     from app.source import SCHEMA, PRIMARY_KEYS
     result = {}
-    for table, fields in SCHEMA.items():
+    for table, fields in (schema or SCHEMA).items():
         fingerprint = hashlib.sha256(canonical([table, fields]).encode())
         cursor = conn.execute(f"SELECT * FROM {table} ORDER BY {','.join(PRIMARY_KEYS[table])}")
         while rows := cursor.fetchmany(1000):
@@ -98,18 +100,11 @@ def read_retained(manifest, data_dir=DATA_DIR):
     mapping = json.loads(paths["mapping.json"].read_text(encoding="utf-8")) if "mapping.json" in paths else None
     tables = {}
     if mapping:
+        from app.source import mapped_source_rows
         for table, spec in mapping["tables"].items():
             path = paths[spec["file"]]
-            if path.suffix.lower() == ".csv":
-                with path.open(encoding="utf-8-sig", newline="") as handle:
-                    rows = list(csv.DictReader(handle))
-            else:
-                book = load_workbook(path, read_only=True, data_only=True)
-                values = book[spec["sheet"]].iter_rows(values_only=True)
-                headers = next(values)
-                rows = [dict(zip(headers, row)) for row in values]
-                book.close()
-            tables[table] = [{field: row[column] for field, column in spec["columns"].items()} for row in rows]
+            tables[table] = [{field: row[column] for field, column in spec["columns"].items() if column}
+                             for row in mapped_source_rows(path, spec["sheet"])]
     else:
         for path in paths.values():
             if path.suffix.lower() == ".csv":
