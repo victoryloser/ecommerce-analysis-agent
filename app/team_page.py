@@ -3,29 +3,99 @@ from app.weekly_page import PANEL, SCRIPT
 PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>团队经营分析</title>
 <style>
-*{box-sizing:border-box}body{margin:0;background:#f5f6f3;color:#203731;font:16px/1.6 "Source Sans 3","Microsoft YaHei",system-ui,sans-serif}
-main{max-width:970px;margin:32px auto;padding:0 20px}section,details{background:white;border:1px solid #d0d9d4;padding:16px 20px;margin:16px 0}
-header,.row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}header{justify-content:space-between}
-button,input,select,textarea{font:inherit;padding:6px 10px;max-width:100%}button{cursor:pointer;background:#164d40;color:white;border:0;border-radius:4px}
-textarea{width:100%}table{border-collapse:collapse}th,td{padding:5px 10px;border-bottom:1px solid #ddd;text-align:left}
-pre{white-space:pre-wrap;overflow-wrap:anywhere}#output{overflow:auto}h1,h2{margin:.3em 0}
-</style><main><header><h1>团队经营分析</h1><span id="identity"></span></header>
-<section id="analysis" hidden><div class="row"><label>数据快照 <select id="dataset"></select></label>
-<button id="fresh">新会话</button></div><label for="question">经营问题</label>
+:root{color-scheme:light;--ink:#101e31;--muted:#4e6170;--line:#d6e0e4;--teal:#096b60;--mint:#40e0b4;--pale:#eef6f4}
+*{box-sizing:border-box}
+body{margin:0;background:#f1f5f6;color:var(--ink);font:16px/1.55 "Inter","Microsoft YaHei UI","PingFang SC",system-ui,sans-serif}
+main{max-width:1280px;margin:auto;padding:24px clamp(12px,3.5vw,48px) 56px}
+header{isolation:isolate;position:relative;overflow:hidden;border-radius:18px;background:var(--ink);color:white;
+ padding:clamp(20px,3vw,40px);box-shadow:0 9px 24px #101e3114}
+header::before{content:"";position:absolute;inset:0 0 0 45%;z-index:-2;
+ background:linear-gradient(90deg,var(--ink),transparent 25%),repeating-linear-gradient(0deg,transparent 0 27px,#5ba3952b 27px 28px),
+ repeating-linear-gradient(90deg,transparent 0 27px,#5ba3952b 27px 28px),linear-gradient(100deg,#102334,#1a3942)}
+header::after{content:"";position:absolute;top:13%;right:-2%;bottom:8%;width:48%;z-index:-1;opacity:.78;
+ background:linear-gradient(100deg,#239d92,#40e0b4);clip-path:polygon(0 95%,20% 59%,31% 72%,51% 32%,64% 48%,91% 5%,100% 12%,
+ 100% 14%,91% 7%,64% 50%,51% 34%,31% 74%,20% 61%,0 97%)}
+.heading-line,.row,.actions,nav{display:flex;align-items:center;flex-wrap:wrap;gap:10px}
+h1,h2,p{margin:0}
+h1{font-size:clamp(28px,3.4vw,46px);line-height:1.25;font-weight:750;letter-spacing:-.045em}
+.brand-mark{display:inline-grid;place-items:center;flex:none;width:42px;height:42px;border:1px solid #75ecd763;border-radius:11px;background:#174740}
+.brand-mark::before{content:"";width:22px;height:22px;background:var(--mint);
+ clip-path:polygon(0 65%,24% 65%,24% 100%,0 100%,0 65%,36% 65%,36% 32%,61% 32%,61% 100%,36% 100%,36% 65%,76% 65%,76% 0,100% 0,100% 100%,76% 100%,76% 65%)}
+#identity{margin-inline-start:6px;border-left:1px solid #709890;padding-inline-start:14px;color:#c4eee4;font-weight:600;overflow-wrap:anywhere}
+#identity:empty{display:none}
+nav{gap:16px;margin-top:14px}
+nav a{color:#d8eee9;text-decoration:none;font-size:14px;padding:8px 0;display:inline-flex;align-items:center;min-height:44px}
+nav a:hover{color:white;text-decoration:underline;text-underline-offset:5px}
+.workspace{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:18px;margin:18px 0;align-items:start}
+.main-column,aside{display:grid;align-content:start;gap:14px;min-width:0}
+section,aside>details{min-width:0;padding:clamp(16px,2vw,26px);border:1px solid var(--line);background:white;border-radius:13px}
+#analysis{border-top:3px solid var(--teal)}
+h2{font-size:21px;line-height:1.35;letter-spacing:-.025em;margin-bottom:16px}
+.row,.actions{row-gap:8px}.actions{margin:10px 0 16px}
+.analysis-tools{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.analysis-tools>details{margin:0}.analysis-tools>details[open]{grid-column:1/-1}
+.snapshot-row{margin-bottom:16px;padding:10px 12px;background:#f4f8f9;border:1px solid #e0e8ea;border-radius:8px}
+button,input,select,textarea{font:inherit;color:inherit;max-width:100%;min-width:0;vertical-align:middle}
+button,input:not([type=checkbox]),select,textarea{border:1px solid #abbfc4;border-radius:7px;min-height:44px;padding:8px 11px;background:white}
+button{font-size:14px;font-weight:650;cursor:pointer;color:#20464b;transition:background-color .15s ease,border-color .15s ease}
+button:hover{background:var(--pale);border-color:#62998e}
+button.primary{background:var(--teal);border-color:var(--teal);color:white;padding-inline:22px}
+button.primary:hover{background:#09564d}
+button:disabled{opacity:.6;cursor:wait}
+#report:disabled,#viewWeekly:disabled{cursor:default;color:var(--muted);background:#f3f6f7}
+input[type=checkbox]{accent-color:var(--teal)}
+label{font-weight:550;font-size:14px;color:#384e5c}
+label>select,label>input{margin:2px}
+textarea{width:100%;resize:vertical}
+#question{background:#fafcfc;margin-top:8px}
+.question-label{display:block;margin:12px 0 4px}
+#examples,#reports{width:100%}
+#report{margin-top:8px}
+details{min-width:0;margin-top:8px;padding:0 12px;border:1px solid var(--line);border-radius:8px}
+aside>details{margin:0;padding:2px 16px}
+summary{min-height:44px;cursor:pointer;align-content:center;font-weight:650;font-size:15px;color:#253b4a}
+summary::marker{color:var(--teal)}
+details[open]{padding-bottom:14px}details[open]>summary{margin-bottom:10px;border-bottom:1px solid var(--line)}
+#weeklyPanel .row+div,#weeklyAnalyst>.row{margin-top:12px}
+details p,#weeklyAnalyst>p{margin:8px 0;color:var(--muted);font-size:14px}
+details button,details input,details select{margin-block:3px}
+pre{margin:12px 0;white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.7 "IBM Plex Mono",Consolas,monospace;color:#314956}
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left}
+th{color:#294856;background:#edf4f5;white-space:nowrap}td{overflow-wrap:anywhere}
+#result,#opsDaily{overflow-x:auto;max-width:100%}#status,#opsSummary,#jobList{overflow-wrap:anywhere}
+#result:not(:empty){margin-top:10px}#result>.answer{font-family:inherit;font-size:16px;color:var(--ink)}
+#status:not(:empty){display:inline-block;color:var(--teal);font-size:14px;font-weight:650}
+.empty-result{display:none}#output:has(#result:empty):has(#status:empty) .empty-result{display:block}
+.empty-result,.empty-list{color:var(--muted);font-size:14px}
+a{color:var(--teal)}:focus-visible{outline:3px solid #208a84;outline-offset:3px}header :focus-visible{outline-color:var(--mint)}
+@media(max-width:850px){.workspace{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:600px){main{padding-top:12px}.workspace{gap:12px;margin:12px 0}
+ header::before{left:30%;opacity:.5}header::after{width:36%;opacity:.42}
+ .snapshot-row label,.snapshot-row select{max-width:100%}.snapshot-row label{display:grid;flex:1;min-width:0}
+ .actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.actions button{padding-inline:5px}
+ #weeklyPanel .row{align-items:flex-start}nav{gap:12px}}
+@media(prefers-reduced-motion:reduce){button{transition:none}}
+</style><main><header><div class="heading-line"><span class="brand-mark" aria-hidden="true"></span><h1>团队经营分析</h1><span id="identity"></span></div>
+<nav aria-label="工作区导航"><a href="#output">结果与依据</a><a href="#sharedReports">分享的汇总</a><a href="#weeklyPanel">每周经营复盘</a></nav></header>
+<div class="workspace"><div class="main-column">
+<section id="analysis" hidden><h2>对话分析</h2><div class="row snapshot-row"><label>数据快照 <select id="dataset"></select></label>
+<button id="fresh">新会话</button></div><label class="question-label" for="question">经营问题</label>
 <select id="examples" aria-label="当前快照可问的问题"></select>
 <textarea id="question" rows="2" placeholder="输入经营问题，或选择上方示例"></textarea>
-<button id="ask">分析</button> <button id="sync">同步交付并重算</button> <button id="resume">继续未完成分析</button>
-<button id="proof">本轮计算依据</button>
-<details><summary>历史会话</summary><div class="row"><input id="term" aria-label="搜索问题"><button id="search">搜索</button>
+<div class="actions"><button class="primary" id="ask">分析</button> <button id="sync">同步交付并重算</button> <button id="resume">继续未完成分析</button>
+<button id="proof">本轮计算依据</button></div>
+<div class="analysis-tools"><details><summary>历史会话</summary><div class="row"><input id="term" aria-label="搜索问题"><button id="search">搜索</button>
 <button id="sessions">列出会话</button><select id="saved" aria-label="历史会话"></select><button id="open">打开</button></div></details>
 <details><summary>比较与分享</summary><label>目标快照 <select id="target"></select></label> <button id="compare">比较</button>
 <p><input id="title" placeholder="报告标题"><input id="recipient" placeholder="接收人账号"><button id="share">分享当前汇总</button>
 <button id="export" hidden>下载完整结果</button></p></details>
 <details id="orderTools" hidden><summary>核查订单</summary><input id="orderId" placeholder="订单号"> <button id="order">查看来源行</button></details>
 <details id="sqlTools" hidden><summary>只读 SQL</summary><select id="scope"><option value="analysis_result">当前分析结果</option></select>
-<textarea id="sqlText" placeholder="输入问题生成 SQL 草稿，或直接输入查询"></textarea><button id="draft">生成草稿</button> <button id="sql">执行</button></details>
+<textarea id="sqlText" placeholder="输入问题生成 SQL 草稿，或直接输入查询"></textarea><button id="draft">生成草稿</button> <button id="sql">执行</button></details></div>
 </section>
-<section><h2>分享的汇总</h2><select id="reports" aria-label="可查看的报告"></select> <button id="report">打开报告</button></section>
+<section id="output" aria-live="polite"><h2>结果与依据</h2><p id="status"></p><p class="empty-result">分析结果和已打开的报告将显示在这里。</p><div id="result"></div></section></div>
+<aside aria-label="团队工具"><section id="sharedReports"><h2>分享的汇总</h2><p class="empty-list" id="noReports" hidden>暂无可查看的汇总。</p><select id="reports" aria-label="可查看的报告"></select> <button id="report">打开报告</button></section>
 <details id="uploadTools" hidden><summary>接入数据</summary><label>模板 <select id="template"><option value="orders_items">订单和商品明细</option><option value="full">完整九表</option></select></label>
 <p><input id="files" type="file" accept=".xlsx,.csv" multiple><button id="inspect">识别字段</button></p>
 <div id="mappingFields"></div><label>轻量模板金额口径（人民币元）
@@ -35,12 +105,11 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}#output{overflow:auto}h1,h2{marg
 <label>来源版本 <select id="parent"></select></label> <button id="preview">核对可用指标</button> <button id="import">导入</button></details>
 <details id="claimTools" hidden><summary>认领本机旧会话</summary><label>当前快照的旧会话 ID <input id="legacyId"></label>
 <button id="claim">认领到管理员历史</button></details>
-""" + PANEL + """
 <details id="jobPanel"><summary>后台任务</summary><button id="refreshJobs">刷新任务</button>
 <p id="jobMessage" role="status"></p><div id="jobList"></div></details>
 <details id="opsPanel" hidden><summary>实例运行状态</summary><button id="opsStatus">查看近 7 天</button>
 <button id="modelProbe">测试模型连接</button><div id="opsSummary"></div><div id="opsDaily"></div></details>
-<section id="output" aria-live="polite"><h2>结果与依据</h2><p id="status"></p><div id="result"></div></section></main>
+</aside></div>""" + PANEL + """</main>
 <script>
 const el=id=>document.getElementById(id); let session=null,examples={},view=0,actionTail=Promise.resolve(),jobTimer;
 function showExamples(){const qs=examples[el('dataset').value]||[];options(el('examples'),[['','选择一个可问的问题'],...qs.map(q=>[q,q])])}
@@ -86,6 +155,7 @@ async function refresh(selected){const d=await request('/api/home');el('identity
  options(el('parent'),[['','新数据源'],...Object.entries(d.datasets)]);
  if(d.datasets[selected||previous])el('dataset').value=selected||previous;showExamples();
  options(el('reports'),d.reports.map(r=>[r.id,r.title]));
+ el('reports').hidden=el('report').disabled=!d.reports.length;el('noReports').hidden=!!d.reports.length;
  el('analysis').hidden=!d.permissions.includes('analyze');el('uploadTools').hidden=d.role!=='admin';
  el('claimTools').hidden=d.role!=='admin';
  el('opsPanel').hidden=d.role!=='admin';el('jobPanel').hidden=d.role==='reader';
@@ -96,7 +166,7 @@ async function refresh(selected){const d=await request('/api/home');el('identity
  if(d.permissions.includes('details') && !el('scope').querySelector('[value="raw"]'))el('scope').add(new Option('原始表','raw'))
 }
 function show(data){const box=el('result');box.replaceChildren();const r=data.result||data;
- if(data.answer){const p=document.createElement('pre');p.textContent=data.answer;box.append(p)}
+ if(data.answer){const p=document.createElement('pre');p.className='answer';p.textContent=data.answer;box.append(p)}
  if(r.error){const p=document.createElement('pre');p.textContent=r.error;box.append(p)}
  if(r.columns && r.rows){const t=document.createElement('table');
  for(const [i,row] of [r.columns,...r.rows].entries()){const tr=t.insertRow();
@@ -104,8 +174,19 @@ function show(data){const box=el('result');box.replaceChildren();const r=data.re
  if(r.quality?.length){const details=document.createElement('details'),title=document.createElement('summary'),quality=document.createElement('pre');
  title.textContent='金额准入与数据完整度';quality.textContent=JSON.stringify(r.quality,null,2);details.append(title,quality);box.append(details)}}
  const p=document.createElement('pre');const extra={...data};if(r.columns){delete extra.rows;delete extra.columns;delete extra.result}
- delete extra.answer;delete extra.download;if(Object.keys(extra).length){p.textContent=JSON.stringify(extra,null,2);box.append(p)}
+ delete extra.answer;delete extra.download;
+ if(Object.keys(extra).length){
+  p.textContent=JSON.stringify(extra,null,2);
+  if(r.columns && r.rows){
+   const detail=document.createElement('details'),title=document.createElement('summary');
+   title.textContent='查看完整记录';detail.append(title,p);box.append(detail)
+  }else box.append(p)
+ }
  if(data.download){const a=document.createElement('a');a.href='/api/files/'+encodeURIComponent(data.download);a.textContent='下载本次结果';box.append(a)}
+ if(r.columns && r.rows){
+  const output=el('output'),bounds=output.getBoundingClientRect();
+  if(bounds.bottom<=0||bounds.top>innerHeight-80)output.scrollIntoView({block:'start'})
+ }
 }
 function bind(id,fn){el(id).onclick=async()=>{el(id).disabled=true;el('status').textContent='处理中…';try{
  const result=await fn();el('status').textContent=result?.job?'已提交后台任务':result?.result?.error?'查询未完成':'完成'

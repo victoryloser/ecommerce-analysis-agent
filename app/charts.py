@@ -45,7 +45,7 @@ def render_charts(evidence: dict, columns: list[str]) -> str:
             value = row[column]
             if value is None:
                 group = str(row.get("entity_name", row.get("entity_id", index+1)))
-                bars.append(f'<div style="padding:5px">{escape(group)}：未知 / 不可计算</div>')
+                bars.append(f'<div class="chart-unknown">{escape(group)}：未知 / 不可计算</div>')
                 continue
             text = cell(column, value, plan) if plan else str(value)
             group = str(row.get("entity_name", row.get("entity_id", index+1)))
@@ -53,10 +53,10 @@ def render_charts(evidence: dict, columns: list[str]) -> str:
             tag = "button" if plan and plan.intent != "details" and not column.endswith("_previous") and not column.startswith("previous_") else "div"
             attrs = f' data-group-id="{escape(group_id, quote=True)}" type="button"' if tag == "button" else ""
             width = abs(float(value)) / scale * 100
-            color = "#dc7446" if float(value) < 0 else "#317b9f"
-            bars.append(f'<{tag}{attrs} style="display:grid;grid-template-columns:120px 1fr 100px;gap:8px;align-items:center;width:100%;text-align:left;padding:5px;border:0;background:transparent" aria-label="{escape(group+text, quote=True)}">'
-                        f'<span>{escape(group)}</span><span style="height:16px;background:#edf0f2;border-radius:3px"><span style="display:block;height:100%;width:{width:.4f}%;background:{color};border-radius:3px"></span></span>'
+            tone = "negative" if float(value) < 0 else "positive"
+            bars.append(f'<{tag}{attrs} class="chart-row" aria-label="{escape(group+"："+text, quote=True)}">'
+                        f'<span>{escape(group)}</span><span class="chart-track"><span class="{tone}" style="width:{width:.4f}%"></span></span>'
                         f'<span>{escape(text)}</span></{tag}>')
-        sections.append(f'<section style="border:1px solid #dce3e8;padding:12px;border-radius:8px;min-width:280px"><h3>{escape(label(column))}</h3>'+"".join(bars)+"</section>")
+        sections.append(f'<section><h3>{escape(label(column))}</h3>'+"".join(bars)+"</section>")
     note = ("当前页前50组；" if len(result["rows"]) > 50 else "") + "不同指标独立刻度，同一指标本期与基期共享刻度；负值为橙色。点击本期或变化额下钻当前期间，基期仅展示。"
-    return '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px">'+"".join(sections)+"</div><p>"+note+"</p>"
+    return '<div class="desk-charts">'+"".join(sections)+"</div><p>"+note+"</p>"

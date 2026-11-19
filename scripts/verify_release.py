@@ -60,15 +60,16 @@ def main():
                 assert set(archive.namelist()) == set(manifest["files"]) | {"MANIFEST.json"}
                 assert len(archive.namelist()) == len(set(archive.namelist())), "duplicate archive members"
                 report["commit_sha"] = manifest["commit_sha"]
+                competition = manifest.get("profile") == "competition"
                 if (ROOT / ".git").exists():
-                    _, expected = commit_files(ROOT, manifest["commit_sha"])
+                    _, expected = commit_files(ROOT, manifest["commit_sha"], competition=competition)
                     assert set(expected) == set(manifest["files"]), "archive differs from commit allowlist"
                     assert all(archive.read(n) == b for n, b in expected.items()), "archive bytes differ from commit"
                 for filename, item in manifest["files"].items():
                     payload = archive.read(filename)
                     assert hashlib.sha256(payload).hexdigest() == item["sha256"], filename
                     assert len(payload) == item["bytes"], filename
-                    assert allowed(filename), f"Excluded release member: {filename}"
+                    assert allowed(filename, competition=competition), f"Excluded release member: {filename}"
                 archive.extractall(work)
             python = work / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 

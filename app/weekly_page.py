@@ -1,5 +1,5 @@
 PANEL = """<section id="weeklyPanel"><h2>每周经营复盘</h2>
-<div class="row"><label>团队周报 <select id="weeklyReport"></select></label><button id="viewWeekly">查看周报</button>
+<div class="row"><label id="weeklyReportLabel">团队周报 <select id="weeklyReport"></select></label><span class="empty-list" id="noWeekly" hidden>暂无可查看的周报。</span><button id="viewWeekly">查看周报</button>
 <a id="weeklyLink" hidden>本周报固定链接</a></div>
 <div id="weeklyAnalyst" hidden><div class="row"><label>模板 <select id="weeklyTemplate"></select></label>
 <label>截至业务日期 <input id="weekAsOf" type="date"></label><button id="runWeekly">运行上周复盘</button></div>
@@ -44,6 +44,7 @@ async function weeklyIndex(report,template,ticket){
   ['weeklyTemplate',d.templates.map(t=>[t.id,t.title+' v'+t.version]),template],
   ['issueList',d.tickets.map(t=>[t.id,t.order_id+' / '+t.item_key+' · '+t.state]),ticket]]){
   const pick=el(id),previous=wanted||pick.value;options(pick,items);if(items.some(i=>i[0]===previous))pick.value=previous}
+ el('weeklyReportLabel').hidden=el('viewWeekly').disabled=!d.reports.length;el('noWeekly').hidden=!!d.reports.length;
 }
 async function weeklyView(){
  const key=val('weeklyReport');if(!key)throw Error('请选择周报');

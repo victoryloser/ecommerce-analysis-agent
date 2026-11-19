@@ -76,8 +76,10 @@ python scripts/record_round2.py --snapshots .build/r2-snapshots.json --questions
 
 ## 固定源码包
 
+在开发仓库中运行以下命令。比赛源码包保留导入脚本、完整测试和业务文档。仓库内的浏览器检查、录制和发布验证工具供开发者使用。
+
 ```powershell
-python scripts/build_release.py --commit <已提交的SHA> --output dist/source.zip
+python scripts/build_release.py --competition --commit <已提交的SHA> --output dist/source.zip
 python scripts/verify_release.py --archive dist/source.zip
 ```
 

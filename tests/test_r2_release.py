@@ -13,6 +13,16 @@ def test_exclusions(name):
     assert not allowed(name)
 
 
+def test_competition_release_selection():
+    for name in (".gitignore", ".gitattributes", ".github/workflows/ci.yml",
+                 "scripts/check_ui.py", "scripts/capture_readme.py", "scripts/record_demo.py",
+                 "scripts/record_round2.py", "scripts/verify_release.py"):
+        assert allowed(name) and not allowed(name, competition=True)
+    for name in ("scripts/prepare_round2.py", "scripts/build_release.py", "tests/test_r2_release.py",
+                 "docs/data-format.md", "docs/metrics.md"):
+        assert allowed(name, competition=True)
+
+
 def test_release_uses_commit_bytes_and_is_reproducible(tmp_path):
     root = tmp_path/"repo"
     root.mkdir()

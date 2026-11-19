@@ -14,18 +14,23 @@ DOC_FILES = {"docs/data-format.md", "docs/development.md", "docs/metrics.md", "d
              "docs/assets/project-banner.svg", "docs/images/analysis.png", "docs/images/first-run.png"}
 
 
-def allowed(name):
+def allowed(name, *, competition=False):
     path = PurePosixPath(name)
     if path.is_absolute() or ".." in path.parts or "\\" in name:
         return False
     if path.name.lower() in {"agents.md", "agent.md"} or any(w in name for w in ("方案", "深化设计")):
         return False
+    if competition:
+        if path.parts[0] in {".github", ".gitignore", ".gitattributes"}:
+            return False
+        if path.parts[0] == "scripts":
+            return name in {"scripts/prepare_round2.py", "scripts/build_release.py"}
     return name in TOP_FILES or name in DOC_FILES or (
         path.parts[0] in {"app", "tests", "scripts"} and path.suffix == ".py" and "__pycache__" not in path.parts) or (
         path.parts[:2] == (".github", "workflows") and path.suffix in {".yml", ".yaml"})
 
 
-def commit_files(root, revision):
+def commit_files(root, revision, *, competition=False):
     commit = subprocess.check_output(["git", "rev-parse", "--verify", revision+"^{commit}"], cwd=root).decode().strip()
     entries = subprocess.check_output(["git", "ls-tree", "-rz", commit], cwd=root).split(b"\0")
     selected = []
@@ -35,7 +40,7 @@ def commit_files(root, revision):
         metadata, raw_name = entry.split(b"\t", 1)
         mode, kind, oid = metadata.split()
         name = raw_name.decode("utf-8")
-        if mode in {b"100644", b"100755"} and kind == b"blob" and allowed(name):
+        if mode in {b"100644", b"100755"} and kind == b"blob" and allowed(name, competition=competition):
             selected.append((name, oid))
     selected.sort()
     raw = subprocess.check_output(["git", "cat-file", "--batch"], input=b"\n".join(oid for _, oid in selected)+b"\n", cwd=root)
@@ -50,12 +55,14 @@ def commit_files(root, revision):
     return commit, files
 
 
-def build(root, revision, target):
-    commit, payloads = commit_files(root, revision)
+def build(root, revision, target, *, competition=False):
+    commit, payloads = commit_files(root, revision, competition=competition)
     project = tomllib.loads(payloads["pyproject.toml"].decode())["project"]
     manifest = {"project": project["name"], "version": project["version"], "commit_sha": commit,
         "build_mode": "git-commit", "files": {name: {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
                                                 for name, data in payloads.items()}}
+    if competition:
+        manifest["profile"] = "competition"
     target.parent.mkdir(parents=True, exist_ok=True)
     with ZipFile(target, "w", ZIP_DEFLATED) as archive:
         for name, payload in [*payloads.items(), ("MANIFEST.json", json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2).encode())]:
@@ -76,9 +83,10 @@ def build(root, revision, target):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--commit", required=True, help="发布版本；文件内容直接取自该提交")
+    parser.add_argument("--competition", action="store_true", help="生成比赛源码包，精简仓库配置及开发脚本")
     parser.add_argument("--output", type=Path, default=ROOT/"dist/ecommerce-analysis-agent.zip")
     args = parser.parse_args()
-    print(json.dumps(build(ROOT, args.commit, args.output.resolve()), ensure_ascii=False))
+    print(json.dumps(build(ROOT, args.commit, args.output.resolve(), competition=args.competition), ensure_ascii=False))
 
 
 if __name__ == "__main__":

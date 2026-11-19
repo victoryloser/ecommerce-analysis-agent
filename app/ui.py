@@ -20,6 +20,7 @@ from app.charts import numeric_columns, render_charts, CLICK_SCRIPT
 from app.data_upload import registered_datasets, inspect_mapping, import_upload
 from app.delivery import is_delivery_request, refresh_delivery
 from app.review_ui import add_review_panel
+from app.ui_style import MASTHEAD, STYLE, snapshot_overview
 
 
 def build_ui():
@@ -159,7 +160,8 @@ def build_ui():
         return (gr.Row(visible=can_drill), gr.Row(visible=workflow.get("type") == "workflow"),
                 gr.Row(visible=ready and (result.get("truncated", False) or result.get("row_offset", 0) > 0 or len(result.get("rows", [])) >= 100)),
                 gr.Button(visible=ready), gr.Accordion(visible=bool(numeric_columns(evidence))),
-                gr.Button(visible=can_retry and not workflow), result.get("page_size") or MAX_ROWS, page_note)
+                gr.Button(visible=can_retry and not workflow), result.get("page_size") or MAX_ROWS, page_note,
+                gr.Column(visible=bool(evidence)))
 
     def catalog_table(catalog):
         rows = []
@@ -370,62 +372,81 @@ def build_ui():
         return session.transcript, session, turn.evidence, *result_components(turn.evidence), archives(dataset_id, session.session_id)
 
     status_labels = STATUS_LABELS
-    with gr.Blocks(title="经营数据分析") as demo:
-        gr.Markdown("# 经营数据分析\n选择数据，用一句话了解销售、订单、履约和客户表现。")
-        with gr.Row():
-            dataset = gr.Dropdown(choices=[(label, key) for key, label in datasets.items()], value=initial_dataset, label="分析数据")
-        empty_notice = gr.Markdown("还没有可分析的数据。请在下方上传 Excel 或 CSV 文件，核对字段后开始分析。", visible=initial_dataset is None)
+    with gr.Blocks(title="经营数据分析", fill_width=True) as demo:
+        gr.HTML(MASTHEAD, head=f"<style>{STYLE}</style>", apply_default_css=False, elem_id="console-masthead",
+                js_on_load="""element.addEventListener('click', (event) => {
+                    const link = event.target.closest('a[data-section]');
+                    if (!link) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const panel = document.getElementById(link.dataset.section);
+                    const control = panel.querySelector('input, button');
+                    if (link.dataset.section === 'data-intake' && !document.getElementById('upload-input')?.checkVisibility()) control.click();
+                    control.focus({preventScroll: true});
+                    panel.scrollIntoView({block: 'start'});
+                });""")
+        with gr.Row(elem_id="snapshot-row"):
+            dataset = gr.Dropdown(choices=[(label, key) for key, label in datasets.items()], value=initial_dataset, label="分析数据", scale=2, min_width=200)
+            overview = gr.HTML(snapshot_overview(initial_manifest), apply_default_css=False, elem_id="snapshot-overview", visible=initial_manifest is not None)
+        empty_notice = gr.Markdown("还没有可分析的数据。请在下方上传 Excel 或 CSV 文件，核对字段后开始分析。", visible=initial_dataset is None, elem_id="empty-notice")
         with gr.Column(visible=initial_dataset is not None) as analysis_workspace:
             practice = gr.Checkbox(value=False, visible=False)
             session = gr.State(None)
-            with gr.Accordion("历史会话", open=False):
+            with gr.Row(elem_id="conversation-row"):
+                chat = gr.Chatbot(label="分析对话", height=340, scale=3, min_width=275,
+                                  placeholder='<span class="desk-chat-empty">当前会话还没有分析记录</span>', elem_id="conversation-log")
+                with gr.Column(scale=2, min_width=275, elem_id="composer"):
+                    gr.HTML('<h2 class="desk-section">经营提问</h2>', apply_default_css=False)
+                    slot_choice = gr.Dropdown(choices=[], value=None, label="选择补充条件后点击分析", visible=False)
+                    questions = gr.Dropdown(choices=example_questions(initial_manifest) if initial_manifest else [], label="试试这样问", value=None)
+                    message = gr.Textbox(label="问题", placeholder="例如：按月份查看商品销售额和订单量")
+                    with gr.Row(elem_id="composer-actions"):
+                        send = gr.Button("分析", variant="primary", scale=2, min_width=90, elem_id="run-analysis")
+                        reset = gr.Button("新建会话", scale=1, min_width=90, elem_id="new-analysis")
+                    with gr.Accordion("历史会话", open=False, elem_id="history-panel"):
+                        saved = gr.Dropdown(choices=archives(initial_dataset).choices, label="选择会话")
+                        with gr.Row():
+                            refresh = gr.Button("刷新列表", min_width=90)
+                            restore = gr.Button("继续分析", min_width=90)
+            with gr.Column(visible=False, elem_id="result-panel") as result_panel:
+                gr.HTML('<h2 class="desk-section">结果与依据</h2>', apply_default_css=False)
+                with gr.Row(visible=False) as drill_controls:
+                    drill_target = gr.Dropdown(choices=[(label, key) for key, label in TARGETS.items()], value="auto", label="点击结果查看明细", info="选择要进一步查看的内容，再点击表格中的记录。")
+                    drill_back = gr.Button("返回上层分析")
+                active_scope = gr.Markdown()
+                result_table = gr.Dataframe(label="本轮查询结果", interactive=False, visible=False, datatype="str", elem_id="query-result")
+                bar = gr.BarPlot(x="分组", y="数值", visible=False, height=300)
+                line = gr.LinePlot(x="分组", y="数值", visible=False, height=300)
+                with gr.Accordion("图表分析", open=False, visible=False) as chart_controls:
+                    chart_metrics = gr.CheckboxGroup(choices=[], label="选择展示指标")
+                    interactive_charts = gr.HTML(value="", js_on_load=CLICK_SCRIPT)
+                with gr.Row(visible=False) as workflow_controls:
+                    step_number = gr.Number(value=1, precision=0, minimum=1, maximum=6, label="分析步骤")
+                    show_step = gr.Button("查看此步骤结果")
+                    resume_tasks = gr.Button("继续未完成任务")
+                retry_query = gr.Button("重试本次查询", visible=False)
+                with gr.Row(visible=False) as pagination_controls:
+                    page_size = gr.Number(value=MAX_ROWS, precision=0, minimum=1, maximum=MAX_ROWS, label="每页行数")
+                    previous_page = gr.Button("上一页")
+                    next_page = gr.Button("下一页")
+                    refresh_page = gr.Button("应用页长并返回首页")
+                page_status = gr.Markdown()
                 with gr.Row():
-                    saved = gr.Dropdown(choices=archives(initial_dataset).choices, label="选择会话", scale=5)
-                    refresh = gr.Button("刷新列表", scale=1)
-                    restore = gr.Button("继续分析", scale=1)
-            chat = gr.Chatbot(label="分析对话", height=480)
-            slot_choice = gr.Dropdown(choices=[], value=None, label="选择补充条件后点击分析", visible=False)
-            questions = gr.Dropdown(choices=example_questions(initial_manifest) if initial_manifest else [], label="试试这样问", value=None)
-            with gr.Row():
-                message = gr.Textbox(label="问题", placeholder="例如：按月份查看商品销售额和订单量；新版交付后输入“数据更新了”", scale=6)
-                send = gr.Button("分析", variant="primary", scale=1)
-                reset = gr.Button("新建会话", scale=1)
-            with gr.Row(visible=False) as drill_controls:
-                drill_target = gr.Dropdown(choices=[(label, key) for key, label in TARGETS.items()], value="auto", label="点击结果查看明细", info="选择要进一步查看的内容，再点击表格中的记录。")
-                drill_back = gr.Button("返回上层分析")
-            active_scope = gr.Markdown()
-            result_table = gr.Dataframe(label="本轮查询结果", interactive=False, visible=False, datatype="str")
-            bar = gr.BarPlot(x="分组", y="数值", visible=False, height=300)
-            line = gr.LinePlot(x="分组", y="数值", visible=False, height=300)
-            with gr.Accordion("图表分析", open=False, visible=False) as chart_controls:
-                chart_metrics = gr.CheckboxGroup(choices=[], label="选择展示指标")
-                interactive_charts = gr.HTML(value="", js_on_load=CLICK_SCRIPT)
-            with gr.Row(visible=False) as workflow_controls:
-                step_number = gr.Number(value=1, precision=0, minimum=1, maximum=6, label="分析步骤")
-                show_step = gr.Button("查看此步骤结果")
-                resume_tasks = gr.Button("继续未完成任务")
-            retry_query = gr.Button("重试本次查询", visible=False)
-            with gr.Row(visible=False) as pagination_controls:
-                page_size = gr.Number(value=MAX_ROWS, precision=0, minimum=1, maximum=MAX_ROWS, label="每页行数")
-                previous_page = gr.Button("上一页")
-                next_page = gr.Button("下一页")
-                refresh_page = gr.Button("应用页长并返回首页")
-            page_status = gr.Markdown()
-            with gr.Row():
-                download_csv = gr.DownloadButton("下载结果 CSV", visible=False)
-                download_json = gr.DownloadButton("下载完整依据 JSON", visible=False)
-                export_all = gr.Button("导出全部结果", visible=False)
-                download_all = gr.DownloadButton("下载完整结果", visible=False)
-                inspect_quality_button = gr.Button("查看质量依据")
-            export_status = gr.Markdown()
-            quality_summary = gr.Markdown()
-            quality_table = gr.Dataframe(label="分析期间的三类问题（预览最多500条，点击记录定位来源）", interactive=False, visible=False)
-            quality_download = gr.DownloadButton("下载当前页质量记录", visible=False)
-            quality_export = gr.Button("导出全部质量记录", visible=False)
-            quality_full = gr.DownloadButton("下载全部质量记录", visible=False)
-            with gr.Accordion("问题原始记录", open=False, visible=False) as quality_source_panel:
-                quality_source = gr.JSON()
+                    download_csv = gr.DownloadButton("下载结果 CSV", visible=False)
+                    download_json = gr.DownloadButton("下载完整依据 JSON", visible=False)
+                    export_all = gr.Button("导出全部结果", visible=False)
+                    download_all = gr.DownloadButton("下载完整结果", visible=False)
+                    inspect_quality_button = gr.Button("查看质量依据")
+                export_status = gr.Markdown()
+                quality_summary = gr.Markdown()
+                quality_table = gr.Dataframe(label="分析期间的三类问题（预览最多500条，点击记录定位来源）", interactive=False, visible=False)
+                quality_download = gr.DownloadButton("下载当前页质量记录", visible=False)
+                quality_export = gr.Button("导出全部质量记录", visible=False)
+                quality_full = gr.DownloadButton("下载全部质量记录", visible=False)
+                with gr.Accordion("问题原始记录", open=False, visible=False) as quality_source_panel:
+                    quality_source = gr.JSON()
             evidence = gr.JSON(visible=False)
+            gr.HTML('<h2 class="desk-section">复盘与查验</h2>', apply_default_css=False)
             add_review_panel(gr, agent, datasets, session, evidence)
             with gr.Accordion("高级分析 · SQL", open=False):
                 gr.Markdown("使用 SQL 进一步分析数据。查询上次分析结果时，数据表名为 `analysis_result`。")
@@ -484,13 +505,15 @@ def build_ui():
                 history_evidence_scope = gr.Markdown()
                 history_evidence_table = gr.Dataframe(interactive=False, visible=False, datatype="str", label="历史查询结果")
                 history_evidence_download = gr.DownloadButton("下载历史回合依据 JSON", visible=False)
-        with gr.Accordion("接入新的Excel/CSV数据", open=initial_dataset is None):
+        with gr.Accordion("接入新的Excel/CSV数据", open=initial_dataset is None, elem_id="data-intake"):
             template = gr.Radio(choices=[("完整九表", "full"), ("订单和商品明细", "orders_items")], value="full", label="接入模板")
-            amount_mode = gr.Radio(choices=[("行商品额，不含运费", "line"), ("商品单价乘数量", "unit"), ("待确认，仅核对订单", "unknown")], value="line", label="轻量模板金额口径（人民币元）")
-            status_map = gr.Textbox(value="{}", label='轻量模板状态映射，如 {"已送达":"delivered"}')
-            gr.Markdown("上传包含订单、客户、商品明细、支付、评价、商品、商家、品类和地理信息的 Excel 或 CSV 文件。先识别文件，再核对字段并导入。新导入按正式复赛金额规则计算：同一明细键出现不同非空商品价时，整单商品额和运费暂不计入，订单仍保留；原始记录完整留存。")
-            upload_files = gr.File(file_count="multiple", file_types=[".csv", ".xlsx"], type="filepath", label="数据文件")
-            inspect_files = gr.Button("识别文件")
+            with gr.Column(visible=False) as light_options:
+                amount_mode = gr.Radio(choices=[("行商品额，不含运费", "line"), ("商品单价乘数量", "unit"), ("待确认，仅核对订单", "unknown")], value="line", label="轻量模板金额口径（人民币元）")
+                status_map = gr.Textbox(value="{}", label='轻量模板状态映射，如 {"已送达":"delivered"}')
+            upload_files = gr.File(file_count="multiple", file_types=[".csv", ".xlsx"], type="filepath", label="数据文件", elem_id="upload-input")
+            inspect_files = gr.Button("识别文件", variant="primary", elem_id="identify-files")
+            with gr.Accordion("完整九表的字段与金额口径", open=False):
+                gr.Markdown("上传包含订单、客户、商品明细、支付、评价、商品、商家、品类和地理信息的 Excel 或 CSV 文件。先识别文件，再核对字段并导入。新导入按正式复赛金额规则计算：同一明细键出现不同非空商品价时，整单商品额和运费暂不计入，订单仍保留；原始记录完整留存。")
             upload_structure = gr.JSON(label="识别结果和前三行样本", visible=True)
             upload_mapping = gr.Code(language="json", visible=False)
             upload_fields = gr.Dataframe(label="核对字段对应关系（可修改来源文件、工作表和来源列名）", interactive=True, visible=False, datatype=["str"]*6, column_count=6, static_columns=[0, 1, 2])
@@ -498,8 +521,11 @@ def build_ui():
             upload_parent = gr.Dropdown(choices=[(name, key) for key, name in datasets.items()], value=None, label="来源版本（可留空；不按上传顺序推断）")
             upload_note = gr.Textbox(value="", label="本次数据变化说明（可留空）")
             upload_origin = gr.Radio(choices=[("自行上传", "uploaded"), ("正式复赛材料", "official"), ("练习数据", "practice"), ("本地构造", "constructed")], value="uploaded", label="材料来源声明")
-            import_files = gr.Button("校验映射并导入")
+            import_files = gr.Button("校验映射并导入", elem_id="confirm-import")
             upload_status = gr.Markdown()
+        template.change(lambda choice: gr.Column(visible=choice == "orders_items"), template, light_options)
+        dataset.change(lambda key: gr.HTML(value=snapshot_overview(executors[key].manifest) if key in executors else "",
+                                           visible=key in executors), dataset, overview)
         questions.input(lambda value: value, questions, message)
         slot_choice.input(lambda value: value, slot_choice, message)
         result_outputs = [result_table, bar, line, download_csv, download_json, slot_choice]
@@ -523,7 +549,7 @@ def build_ui():
         evidence.change(scope_view, [evidence, session], active_scope, concurrency_id="analysis")
         quality_parent = gr.State(None)
         evidence.change(reset_quality, [evidence, quality_parent], [quality_table, quality_download, quality_summary, quality_source, quality_full, quality_export, quality_source_panel], concurrency_id="analysis")
-        evidence.change(result_controls, [evidence, session], [drill_controls, workflow_controls, pagination_controls, export_all, chart_controls, retry_query, page_size, page_status], concurrency_id="analysis")
+        evidence.change(result_controls, [evidence, session], [drill_controls, workflow_controls, pagination_controls, export_all, chart_controls, retry_query, page_size, page_status, result_panel], concurrency_id="analysis")
         sql_catalog.change(catalog_table, sql_catalog, sql_fields, concurrency_id="analysis")
         sql_validation.change(validation_text, sql_validation, sql_validation_message, concurrency_id="analysis")
         upload_mapping.change(mapping_table, upload_mapping, upload_fields, concurrency_id="analysis")
