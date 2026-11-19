@@ -79,3 +79,28 @@ def test_cli_sync_without_model(delivery, tmp_path, monkeypatch, capsys):
     assert "已切换到新版" in output and "与当前快照" in output
     assert is_delivery_request("数据更新了，请按原条件重算。")
     assert not is_delivery_request("数据更新了吗？")
+
+
+def test_cli_recovers_from_invalid_commands_without_contacting_model(delivery, tmp_path, monkeypatch, capsys):
+    import app.cli as cli
+    from app.session_store import SessionStore
+
+    agent, session, _, data_dir = delivery
+    monkeypatch.setattr(cli, "registered_datasets", lambda: registered_datasets(data_dir))
+    monkeypatch.setattr(cli, "Executor", lambda key: agent.executors[key])
+    monkeypatch.setattr(cli, "SessionStore", lambda: SessionStore(tmp_path / "sessions.sqlite3"))
+    monkeypatch.setattr(cli, "ChatCompletionsProvider", lambda: pytest.fail("本地命令不应调用模型"))
+    monkeypatch.setattr("app.trace.RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr("app.sql_workspace.RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr("sys.argv", ["cli", "--snapshot", session.dataset_id])
+    requests = iter(["/back", "/export", "/drill wrong", "/sql SELECT * FROM analysis_result",
+                     "/raw SELECT (", "/raw SELECT 'open", "/raw SELECT COUNT(*) AS order_count FROM orders",
+                     "/reset", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(requests))
+    cli.main()
+    output = capsys.readouterr().out
+    assert "当前没有上层分析" in output and "请先执行查询再导出" in output
+    assert "用法：/drill" in output and "请先完成一次结构化分析" in output
+    assert output.count("SQL 语法无效") == 2
+    assert "order_count：当前页最小1，最大1" in output
+    assert "已清空当前分析条件" in output

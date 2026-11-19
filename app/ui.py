@@ -84,8 +84,7 @@ def build_ui():
             return ("", session.transcript, session, session.last_evidence, *result_components(session.last_evidence),
                     archives(target, session.session_id), selection)
         try:
-            provider()
-            turn = agent.respond(session, question, practice_context)
+            turn = agent.respond(session, question, practice_context, provider_factory=ChatCompletionsProvider)
         except (httpx.HTTPError, ModelConfigurationError) as error:
             gr.Warning(model_error_message(error))
             return question, session.transcript, session, gr.skip(), *(gr.skip() for _ in result_outputs), archives(dataset_id, session.session_id), gr.skip()

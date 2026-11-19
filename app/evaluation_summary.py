@@ -5,9 +5,10 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from app.config import RUNS_DIR
+from app.config import DATA_DIR, DATASETS, RUNS_DIR
 from app.evaluation_cases import cases_for
 from app.semantic import load_manifest
+from app.snapshots import resolve_dataset
 
 
 def summarize(paths: list[Path]) -> dict:
@@ -41,14 +42,19 @@ def summarize(paths: list[Path]) -> dict:
                 superseded.append(latest[key])
             latest[key] = {**record, "dataset_id": report["dataset_id"], "source_report": str(path)}
     datasets = sorted({report["dataset_id"] for _, report in reports})
-    expected = {(dataset, case.case_id) for dataset in datasets for case in cases_for(load_manifest(dataset), "all")}
+    expected = set()
     for dataset in datasets:
+        snapshot = dataset
+        if dataset in DATASETS and not (DATA_DIR / f"{dataset}.manifest.json").is_file():
+            snapshot = resolve_dataset(dataset, DATA_DIR)
+        manifest = load_manifest(snapshot, DATA_DIR)
         hashes = {report["database_sha256"] for _, report in reports if report["dataset_id"] == dataset}
-        if hashes != {load_manifest(dataset)["database_sha256"]}:
+        if hashes != {manifest["database_sha256"]}:
             raise ValueError(f"{dataset} 的报告不是当前同一数据快照")
         metadata = {report["metadata_sha256"] for _, report in reports if report["dataset_id"] == dataset}
-        if metadata != {load_manifest(dataset)["metadata_sha256"]}:
+        if metadata != {manifest["metadata_sha256"]}:
             raise ValueError(f"{dataset} 的报告不是当前同一元数据版本")
+        expected.update((dataset, case.case_id) for case in cases_for(manifest, "all"))
     records = [record for key, record in sorted(latest.items()) if key in expected]
     missing = [{"dataset_id": d, "case_id": c} for d, c in sorted(expected - set(latest))]
     categories = Counter(c["category"] for c in records)

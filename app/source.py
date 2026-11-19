@@ -1,6 +1,8 @@
 """来源表读取：导入器与独立基准共用 IO，不共用计算逻辑。"""
 import csv
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
+from zipfile import BadZipFile
 
 from openpyxl import load_workbook
 
@@ -33,18 +35,35 @@ FOREIGN_KEYS = [
 ]
 
 
-def mapped_source_rows(path, sheet):
-    if path.suffix.lower() == ".csv":
-        with path.open(encoding="utf-8-sig", newline="") as handle:
-            yield from csv.DictReader(handle)
-    else:
-        book = load_workbook(path, read_only=True, data_only=True)
+@contextmanager
+def uploaded_workbook(path):
+    with path.open("rb") as handle:
         try:
+            with closing(load_workbook(handle, read_only=True, data_only=True)) as book:
+                yield book
+        except BadZipFile as error:
+            raise ValueError(f"{path.name} 不是完整的 XLSX 文件，请重新导出并上传。") from error
+
+
+def mapped_source_rows(path, sheet, mapped_columns=()):
+    with ExitStack() as stack:
+        if path.suffix.lower() == ".csv":
+            handle = stack.enter_context(path.open(encoding="utf-8-sig", newline=""))
+            rows = csv.DictReader(handle)
+            headers = rows.fieldnames or []
+        else:
+            book = stack.enter_context(uploaded_workbook(path))
+            if sheet not in book.sheetnames:
+                raise ValueError(f"{path.name} 找不到映射的工作表：{sheet}")
             values = book[sheet].iter_rows(values_only=True)
-            headers = [str(value) for value in next(values)]
-            yield from (dict(zip(headers, row)) for row in values)
-        finally:
-            book.close()
+            headers = [str(value) for value in next(values, ())]
+            rows = (dict(zip(headers, row)) for row in values)
+        for column in dict.fromkeys(mapped_columns):
+            if column and headers.count(column) != 1:
+                location = f"{path.name}/{sheet}" if sheet else path.name
+                issue = "缺少映射列" if column not in headers else "存在重名映射列"
+                raise ValueError(f"{location} {issue}：{column}")
+        yield from rows
 
 
 def source_files(dataset_id: str) -> list[Path]:

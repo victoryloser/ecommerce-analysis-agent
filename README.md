@@ -114,7 +114,9 @@ Business data, sample datasets, databases, and conversation history are not dist
 
 Choose the nine-table competition model or the order-and-line-item template. The latter supports order counts and confirmed CNY line amounts, with optional freight, category, seller, payment and review inputs. Column and worksheet names can be mapped during import.
 
-For a team pilot, set `ANALYSIS_INSTANCE_DIR` to a dedicated customer directory, place the model configuration in that directory's `.env`, provision a local administrator with `python -m app.team_access admin --role admin`, and launch `python -m app.ui`. Each process serves one instance. The team entry supports per-user dataset, evidence and download permissions and an authenticated reverse proxy. [Team deployment instructions](README.zh-CN.md#团队试用)
+For a team pilot, set `ANALYSIS_INSTANCE_DIR` to a dedicated customer directory, configure its `.env`, and provision an administrator with `python -m app.team_access admin --role admin`. Start `python -m app.ui` and `python -m app.team_jobs` with that same instance directory. The team entry supports per-user dataset, evidence and download permissions and an authenticated reverse proxy. [Team deployment](README.zh-CN.md#团队试用) · [Health checks, backup and upgrades](docs/team-operations.md)
+
+Operators can save a verified scope as a weekly template, run it for a confirmed delivery period, publish a fixed report link and review corrections on a later snapshot. Finance users with detail access can track price conflicts to resolution and reconcile posted refunds separately from freight. [Weekly operating instructions](README.zh-CN.md#每周经营复盘)
 
 See the [data format specification (Chinese)](docs/data-format.md) for all fields, types, primary keys, and relationships. Files must satisfy both the file format and business schema requirements for the defined metrics to work.
 

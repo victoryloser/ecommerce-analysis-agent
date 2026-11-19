@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from app.providers import ChatCompletionsProvider
+from app.providers import ChatCompletionsProvider, ModelResponseError, model_error_message
 
 
 def test_missing_configuration_names_are_reported(monkeypatch):
@@ -69,3 +69,29 @@ def test_usage_observation_is_optional_and_config_does_not_expose_credentials(mo
     events = [json.loads(line) for line in trace.event_file.read_text(encoding="utf-8").splitlines()]
     response = next(e for e in events if e["event"] == "provider_response")
     assert response["usage"]["total_tokens"] == 10 and response["returned_model"] == "returned-model"
+
+
+@pytest.mark.parametrize("status", [400, 404])
+def test_rejected_model_configuration_reports_http_status(status):
+    response = httpx.Response(status, request=httpx.Request("POST", "https://model.example"))
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        response.raise_for_status()
+    assert f"HTTP {status}" in model_error_message(caught.value)
+
+
+@pytest.mark.parametrize("content", [b"upstream maintenance", b'{"choices":[]}', b'{"choices":[{"message":{"content":null}}]}'])
+def test_invalid_gateway_reply_is_retryable(monkeypatch, content):
+    for name, setting in {"LLM_BASE_URL": "https://model.example", "LLM_API_KEY": "example", "LLM_MODEL": "example"}.items():
+        monkeypatch.setenv(name, setting)
+    request = httpx.Request("POST", "https://model.example")
+    replies = iter([httpx.Response(200, request=request, content=content),
+                    httpx.Response(200, request=request, json={"choices": [{"message": {"content": "{}"}}]})])
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: next(replies))
+    events = []
+    monkeypatch.setattr("app.providers.observe", lambda *args: events.append(args))
+    provider = ChatCompletionsProvider()
+    with pytest.raises(ModelResponseError) as caught:
+        provider.complete([])
+    assert "无效的对话响应" in model_error_message(caught.value)
+    assert provider.complete([]) == "{}"
+    assert [e[1] for e in events] == ["invalid_response", "ok"]

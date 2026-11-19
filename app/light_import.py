@@ -70,7 +70,7 @@ def normalize_input(tables, settings):
                     raise ValueError(f"同一 {key} 对应多个名称，请核对映射")
     for row in tables["orders"]:
         status = row["order_status"]
-        if status not in settings["status_map"] and status not in {"delivered", "shipped", "approved", "processing", "created", "invoiced", "canceled", "cancelled", "unavailable"}:
+        if str(status) not in settings["status_map"] and status not in {"delivered", "shipped", "approved", "processing", "created", "invoiced", "canceled", "cancelled", "unavailable"}:
             raise ValueError(f"请确认来源状态 {status!r} 的映射，已送达状态映射为 delivered")
         row["order_status"] = settings["status_map"].get(str(status), status)
     for row in tables["order_items"]:

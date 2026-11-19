@@ -11,7 +11,7 @@ from sqlglot.optimizer.qualify import qualify
 
 from app.config import MAX_ROWS, RUNS_DIR
 from app.metadata import table_detail
-from app.models import Contract, QueryResult
+from app.models import AnalysisPlan, Contract, QueryResult
 from app.query_worker import run_query
 from app.semantic import METRICS, RELATIONSHIPS, validate_plan
 from app.source import SCHEMA
@@ -52,20 +52,35 @@ def workspace_catalog(session, scope: Scope, manifest=None) -> dict:
 
 
 def compile_exploration(session, executor, sql: str, parameters: list, scope: Scope) -> tuple[CompiledQuery, dict]:
+    catalog = workspace_catalog(session, scope, executor.manifest)
+    catalog["quality_rule_version"] = executor.context.rule_version
+    return _compile_exploration(executor, sql, parameters, catalog), catalog
+
+
+def compile_recorded_query(executor, evidence):
+    # Rebuild the executed query independently of the editor and its current draft.
+    scope = evidence["scope"]
+    catalog = workspace_catalog(None, scope, executor.manifest) if scope == "raw" else evidence["catalog"]
+    parameters = evidence.get("user_parameters")
+    if parameters is None:
+        prefix = compile_query(AnalysisPlan.model_validate(catalog["source_plan"]), executor.context).parameters if scope == "analysis_result" else ()
+        parameters = evidence["parameters"][len(prefix):]
+    return _compile_exploration(executor, evidence["user_sql"], parameters, catalog), parameters
+
+
+def _compile_exploration(executor, sql, parameters, catalog):
     if not isinstance(parameters, list) or any(isinstance(value, (dict, list)) for value in parameters):
         raise ValueError("绑定参数必须是标量值组成的JSON数组")
-    catalog = workspace_catalog(session, scope, executor.manifest)
     schema = query_schema(executor.context)
-    catalog["quality_rule_version"] = executor.context.rule_version
-    if scope == "raw":
+    if catalog["scope"] == "raw":
         raw_schema = {t: {f: d["type"] for f, d in table["fields"].items()} for t, table in catalog["tables"].items()}
         validate_sql(sql, schema=raw_schema, exploration=True)
         if executor.context.capabilities:
             # Expand stars to the mapped fields before DuckDB sees the physical table.
             tree = qualify(sqlglot.parse_one(sql, read="duckdb"), dialect="duckdb", schema=raw_schema)
-            return CompiledQuery(tree.sql(dialect="duckdb"), tuple(parameters)), catalog
-        return CompiledQuery(sqlglot.parse_one(sql, read="duckdb").sql(dialect="duckdb"), tuple(parameters)), catalog
-    plan = session.last_successful_plan
+            return CompiledQuery(tree.sql(dialect="duckdb"), tuple(parameters))
+        return CompiledQuery(sqlglot.parse_one(sql, read="duckdb").sql(dialect="duckdb"), tuple(parameters))
+    plan = AnalysisPlan.model_validate(catalog["source_plan"])
     validate_plan(plan, executor.manifest)
     base = compile_query(plan, executor.context)
     from app.advanced import extended
@@ -89,7 +104,7 @@ def compile_exploration(session, executor, sql: str, parameters: list, scope: Sc
                    and source is not None and isinstance(source.this, exp.Table) and source.this.name == "analysis_result"
                    and all(isinstance(e, exp.Column) or (isinstance(e, exp.Star) and not e.args) for e in tree.expressions))
     ratios = base.ratios if transparent else {}
-    return CompiledQuery(tree.sql(dialect="duckdb"), base.parameters + tuple(parameters), ratios), catalog
+    return CompiledQuery(tree.sql(dialect="duckdb"), base.parameters + tuple(parameters), ratios)
 
 
 class SQLWorkspace:
@@ -141,21 +156,37 @@ class SQLWorkspace:
                 if draft["source_record_id"] != session.analysis_evidence.get("record_id"):
                     raise ValueError("SQL草稿基于另一份分析结果，请重新生成草稿或编辑SQL后使用当前分析结果")
             compiled, catalog = compile_exploration(session, executor, sql, parameters, scope)
-            trace.record("exploration_sql_approved", scope=scope, sql=compiled.sql, parameters=compiled.parameters,
-                         business_audit="custom_exploration")
-            trace.consume("query")
-            started = time.perf_counter()
-            result = run_query(executor.path, compiled, offset=offset, limit=limit)
-            result.elapsed_ms = round((time.perf_counter() - started) * 1000)
-            trace.record("query_finished", status=result.status, query_id=result.query_id, error=result.error)
-            evidence = self._write(session, executor.manifest, sql, compiled, scope, catalog, result, trace)
-            session.last_evidence = evidence
+            evidence = self._run(session, executor, sql, parameters, compiled, catalog, trace, offset, limit)
             session.sql_state = {"sql": sql, "parameters": parameters, "scope": scope,
                                  "explanation": "已执行的自定义探索SQL", "source_record_id": catalog.get("source_record_id")}
             session.remember(f"[自由 SQL · {scope}]\n{sql}", sql_answer(evidence))
             if self.store:
                 self.store.save(session, executor.manifest)
             return evidence
+
+    def page(self, session, record, offset, limit):
+        executor = self.executors[session.dataset_id]
+        with TurnTrace(session.session_id, session.dataset_id, f"结果翻页 offset={offset}", "pagination") as trace:
+            compiled, parameters = compile_recorded_query(executor, record)
+            evidence = self._run(session, executor, record["user_sql"], parameters, compiled, record["catalog"],
+                                 trace, offset, limit)
+            session.remember(f"[自由 SQL · {record['scope']}]\n{record['user_sql']}", sql_answer(evidence))
+            if self.store:
+                self.store.save(session, executor.manifest)
+            return evidence
+
+    def _run(self, session, executor, sql, parameters, compiled, catalog, trace, offset, limit):
+        scope = catalog["scope"]
+        trace.record("exploration_sql_approved", scope=scope, sql=compiled.sql, parameters=compiled.parameters,
+                     business_audit="custom_exploration")
+        trace.consume("query")
+        started = time.perf_counter()
+        result = run_query(executor.path, compiled, offset=offset, limit=limit)
+        result.elapsed_ms = round((time.perf_counter() - started) * 1000)
+        trace.record("query_finished", status=result.status, query_id=result.query_id, error=result.error)
+        evidence = self._write(session, executor.manifest, sql, parameters, compiled, scope, catalog, result, trace)
+        session.last_evidence = evidence
+        return evidence
 
     def verify(self, session, sql: str, parameters: list, scope: Scope) -> dict:
         """对照已声明计划核对当前快照的完整结果多重集合，不以预览冒充全量。"""
@@ -190,11 +221,12 @@ class SQLWorkspace:
                  "scope": "当前数据快照的全量结果等价；不是任意新数据的公式正确性证明"}, trace)
 
     @staticmethod
-    def _write(session, manifest, sql, compiled, scope, catalog, result, trace):
+    def _write(session, manifest, sql, user_parameters, compiled, scope, catalog, result, trace):
         record = {"record_id": result.query_id, "type": "sql_exploration", "created_at": datetime.now(timezone.utc).isoformat(),
                   "session_id": session.session_id, "dataset_id": session.dataset_id, "scope": scope,
                   "business_audit": "custom_exploration", "source_record_id": catalog.get("source_record_id"),
-                  "catalog": catalog, "user_sql": sql, "sql": compiled.sql, "parameters": compiled.parameters,
+                  "catalog": catalog, "user_sql": sql, "user_parameters": user_parameters,
+                  "sql": compiled.sql, "parameters": compiled.parameters,
                   "result": result.model_dump(), "turn_id": trace.turn_id, "event_file": str(trace.event_file.relative_to(RUNS_DIR)),
                   "calls_used": trace.steps, "model": "user-sql", "planning_calls": 0,
                   **{key: manifest[key] for key in ("metadata_version", "metadata_sha256", "schema_sha256", "database_sha256")},

@@ -1,6 +1,6 @@
 import sqlglot
 from sqlglot import exp
-from sqlglot.errors import OptimizeError
+from sqlglot.errors import OptimizeError, ParseError, TokenError
 from sqlglot.optimizer.qualify import qualify
 
 from app.source import SCHEMA
@@ -18,7 +18,10 @@ EXPLORATION_FUNCTIONS = FUNCTIONS | {"JSON_ARRAY_LENGTH",
 
 def validate_sql(sql: str, *, schema: dict | None = None, exploration: bool = False) -> None:
     schema = SCHEMA if schema is None else schema
-    statements = sqlglot.parse(sql, read="duckdb")
+    try:
+        statements = sqlglot.parse(sql, read="duckdb")
+    except (ParseError, TokenError) as error:
+        raise ValueError("SQL 语法无效，请检查括号、引号及 SELECT 语句。") from error
     allowed = (exp.Select, exp.SetOperation) if exploration else (exp.Select,)
     if len(statements) != 1 or not isinstance(statements[0], allowed):
         raise ValueError("只允许单条 SELECT")

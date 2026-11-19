@@ -8,6 +8,7 @@ import shutil
 from decimal import DecimalException
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 from zipfile import BadZipFile
 
 import duckdb
@@ -21,6 +22,10 @@ from app.executor import Executor
 from app.semantic import PlanError
 from app.session import Session
 from app.snapshots import digest, source_path
+
+
+class DeliveryAccessError(PermissionError):
+    pass
 
 
 def is_delivery_request(question):
@@ -46,32 +51,33 @@ def _delivery_files(directory):
 
 
 def _delivery_mapping(files, manifest, data_dir):
-    structure = discover(files)
-    previous = next((s for s in manifest["sources"] if Path(s["source_file"]).name == "mapping.json"), None)
+    previous = next((s for s in manifest["sources"] if source_path(s, data_dir).name == "mapping.json"), None)
     if previous is None:
-        mapping = suggest_mapping(structure)
+        mapping = suggest_mapping(discover(files))
     else:
-        mapping = json.loads(source_path(previous, data_dir).read_text(encoding="utf-8"))
+        raw = source_path(previous, data_dir).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != previous["sha256"]:
+            raise ValueError("原快照的字段映射与留存指纹不一致，请核对原件或重新导入。")
+        mapping = json.loads(raw)
         workbooks = [p.name for p in files if p.suffix.lower() == ".xlsx"]
         old_names = {t["file"] for t in mapping["tables"].values()}
         for spec in mapping["tables"].values():
             if (spec["sheet"] and len(old_names) == len(workbooks) == 1 and
                     Path(spec["file"]).suffix.lower() == ".xlsx"):
                 spec["file"] = workbooks[0]
+    names = {p.name for p in files}
     used = set()
     for table, spec in mapping["tables"].items():
-        key = f"{spec['file']}:{spec['sheet']}" if spec["sheet"] else spec["file"]
-        source = structure.get(key)
-        if not source or not source["columns"] or not all(field in source["columns"] for field in spec["columns"].values() if field):
-            raise ValueError(f"请核对 {table} 的交付文件、工作表和字段；字段对应关系有变时可在网页重新映射。")
+        if spec["file"] not in names:
+            raise ValueError(f"请核对 {table} 的交付文件；文件名变化时可在网页重新映射。")
         used.add(spec["file"])
-    extra = {p.name for p in files} - used - {"practice_questions.csv"}
+    extra = names - used - {"practice_questions.csv"}
     if extra:
         raise ValueError("交付目录包含未映射的文件，请只放一套完整导出：" + "、".join(sorted(extra)))
     return mapping
 
 
-def _published_delivery(current, directory, data_dir):
+def _published_delivery(current, directory, data_dir, allow_target):
     feed = directory.name
     head = current
     # 同一目录的同步通过文件锁串行发布。旧会话也应使用这条交付链上已发布的最新版。
@@ -79,8 +85,12 @@ def _published_delivery(current, directory, data_dir):
         candidate = json.loads(path.read_text(encoding="utf-8"))
         if candidate.get("delivery_source_id") == feed and candidate["imported_at"] >= head.get("imported_at", ""):
             head = candidate
+    if allow_target and not allow_target(head):
+        raise DeliveryAccessError("目标快照尚未授权，请联系管理员")
     before = _delivery_files(directory)
     if not before:
+        if head["dataset_id"] != current["dataset_id"]:
+            return head
         raise ValueError(f"尚未发现交付文件。请将一套完整的 Excel 或 CSV 导出放入 {directory}，再发送“数据更新了”。")
     with TemporaryDirectory(dir=data_dir) as staging:
         files = [Path(shutil.copyfile(directory / name, Path(staging) / name)) for name in sorted(before)]
@@ -90,14 +100,17 @@ def _published_delivery(current, directory, data_dir):
         for path in files:
             with path.open("rb") as handle:
                 hashes[path.name] = hashlib.file_digest(handle, "sha256").hexdigest()
-        previous = {Path(s["source_file"]).name: s["sha256"] for s in head["sources"]
-                    if Path(s["source_file"]).suffix.lower() in {".csv", ".xlsx"}}
+        previous = {path.name: s["sha256"] for s in head["sources"]
+                    if (path := source_path(s, data_dir)).suffix.lower() in {".csv", ".xlsx"}}
         if hashes == previous:
             return head
+        dataset_id = "upload_" + uuid4().hex[:12]
+        if allow_target and not allow_target({"dataset_id": dataset_id, "delivery_source_id": feed}):
+            raise DeliveryAccessError("目标快照尚未授权，请联系管理员")
         mapping = _delivery_mapping(files, head, data_dir)
         label = head.get("business_label") or head["name"]
         return import_upload(files, mapping, f"{label} · 交付 {digest(hashes)[:8]}", data_dir,
-                             business_label=label, parent_dataset_id=head["dataset_id"], delivery_source_id=feed,
+                             dataset_id=dataset_id, business_label=label, parent_dataset_id=head["dataset_id"], delivery_source_id=feed,
                              quality_rule_version=CalculationContext.from_manifest(head).rule_version, change_note="从交付目录同步")
 
 
@@ -109,12 +122,12 @@ def refresh_delivery(agent, session, question, *, allow_target=None):
         directory.mkdir(parents=True, exist_ok=True)
         feed = directory.name
         with FileLock(data_dir / f".delivery-{feed}.lock"):
-            target = _published_delivery(source.manifest, directory, data_dir)
+            target = _published_delivery(source.manifest, directory, data_dir, allow_target)
+    except DeliveryAccessError:
+        raise
     except (OSError, ValueError, csv.Error, BadZipFile, DecimalException, duckdb.Error) as error:
         text = f"未完成同步，当前仍使用 {session.dataset_id}。{error}"
     else:
-        if allow_target and not allow_target(target):
-            raise PermissionError("目标快照尚未授权，请联系管理员")
         key = target["dataset_id"]
         if key == session.dataset_id:
             text = f"交付文件与当前快照 {key} 一致，已沿用该版本。"

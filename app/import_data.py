@@ -13,7 +13,7 @@ from app.semantic import metadata_hash
 from app.source import FOREIGN_KEYS, PRIMARY_KEYS, SCHEMA, read_source, source_files
 from app.quality import ISSUE_SCHEMA, normalize_rows
 from app.calculation import CalculationContext, LEGACY_RULE
-from app.snapshots import FINGERPRINT_VERSION, publish_alias, table_fingerprints
+from app.snapshots import FINGERPRINT_VERSION, file_sha256, publish_alias, table_fingerprints
 
 
 def import_dataset(dataset_id: str, data_dir=DATA_DIR) -> dict:
@@ -49,7 +49,7 @@ def import_tables(dataset_id: str, tables: dict, sources: list, name: str, data_
             shutil.copyfile(source, target)
             retained.append({"source_file": str(source.relative_to(ROOT)) if source.is_relative_to(ROOT) else source.name,
                              "retained_file": target.relative_to(data_dir).as_posix(),
-                             "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
+                             "sha256": file_sha256(target)})
     with duckdb.connect(str(path)) as conn:
         conn.execute("BEGIN TRANSACTION")
         issues = []
@@ -151,7 +151,7 @@ def import_tables(dataset_id: str, tables: dict, sources: list, name: str, data_
             if not all(isinstance(names, list) and all(isinstance(s, str) and s.strip() for s in names) for names in entries.values()):
                 raise ValueError("每个 ID 的别名应为名称数组")
         manifest["entity_aliases"] = entity_aliases
-    manifest["database_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest["database_sha256"] = file_sha256(path)
     if delivery_source_id:
         manifest["delivery_source_id"] = delivery_source_id
     pending = data_dir / f"{dataset_id}.manifest.tmp"

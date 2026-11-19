@@ -1,6 +1,7 @@
 """每个查询一个子进程，超时后终止并回收。"""
 import multiprocessing as mp
 import csv
+import time
 from decimal import DecimalException
 from pathlib import Path
 from uuid import uuid4
@@ -12,6 +13,7 @@ from app.models import QueryResult
 from app.sql_compiler import CompiledQuery
 from app.quality import decode_quality
 from app.result_math import resolve_ratios
+from app.team_operations import observe
 
 
 def _query(path: str, compiled: CompiledQuery, pipe, offset=0, limit=MAX_ROWS, export_path=None) -> None:
@@ -62,18 +64,23 @@ def run_query(path: Path, compiled: CompiledQuery, timeout: float = QUERY_TIMEOU
     reader, writer = context.Pipe(duplex=False)
     process = context.Process(target=_query, args=(str(path), compiled, writer, offset, limit, str(export_path) if export_path else None))
     query_id = uuid4().hex
+    started = time.monotonic()
+    status = "error"
     process.start()
     writer.close()
     try:
         if not reader.poll(timeout):
+            status = "timeout"
             return QueryResult(query_id=query_id, status="timeout", error=f"查询超过 {timeout} 秒，已终止")
         payload = reader.recv()
         if "error" in payload:
             return QueryResult(query_id=query_id, status="error", error=payload["error"])
-        return QueryResult(query_id=query_id, status="ok" if payload["rows"] or payload.get("row_count") else "empty", **payload)
+        status = "ok" if payload["rows"] or payload.get("row_count") else "empty"
+        return QueryResult(query_id=query_id, status=status, **payload)
     finally:
         if process.is_alive():
             process.terminate()
         process.join()
         process.close()
         reader.close()
+        observe("query", status, round((time.monotonic() - started) * 1000))

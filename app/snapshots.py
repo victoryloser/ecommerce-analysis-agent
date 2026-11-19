@@ -1,6 +1,7 @@
 """不可变快照的入口别名、来源留存与稳定编码。"""
 import hashlib
 import json
+from pathlib import Path, PureWindowsPath
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -23,6 +24,11 @@ def canonical(value):
 
 def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def file_sha256(path):
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def implementation_hash():
@@ -83,8 +89,20 @@ def publish_alias(name, dataset_id, data_dir):
     temporary.replace(path)
 
 
+def legacy_source_path(entry):
+    return Path("legacy-sources") / digest(entry) / PureWindowsPath(entry["source_file"]).name
+
+
 def source_path(entry, data_dir=DATA_DIR):
-    return data_dir / entry["retained_file"] if "retained_file" in entry else ROOT / entry["source_file"]
+    if "retained_file" in entry:
+        return data_dir / PureWindowsPath(entry["retained_file"]).as_posix()
+    portable = data_dir / legacy_source_path(entry)
+    if portable.is_file():
+        return portable
+    original = PureWindowsPath(entry["source_file"])
+    if original.parts[:1] == ("data",):
+        return data_dir.joinpath(*original.parts[1:])
+    return ROOT / original.as_posix()
 
 
 def read_retained(manifest, data_dir=DATA_DIR):
@@ -94,7 +112,7 @@ def read_retained(manifest, data_dir=DATA_DIR):
     paths = {}
     for entry in manifest["sources"]:
         path = source_path(entry, data_dir)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
+        if file_sha256(path) != entry["sha256"]:
             raise ValueError("留存来源与快照哈希不一致")
         paths[path.name] = path
     mapping = json.loads(paths["mapping.json"].read_text(encoding="utf-8")) if "mapping.json" in paths else None

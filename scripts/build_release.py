@@ -10,7 +10,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 ROOT = Path(__file__).resolve().parents[1]
 TOP_FILES = {"README.md", "README.zh-CN.md", "LICENSE", "pyproject.toml", "requirements.lock.txt",
              ".env.example", ".gitignore", ".gitattributes"}
-DOC_FILES = {"docs/data-format.md", "docs/development.md", "docs/metrics.md", "docs/round2-evaluation.md",
+DOC_FILES = {"docs/data-format.md", "docs/development.md", "docs/metrics.md", "docs/round2-evaluation.md", "docs/team-operations.md",
              "docs/assets/project-banner.svg", "docs/images/analysis.png", "docs/images/first-run.png"}
 
 

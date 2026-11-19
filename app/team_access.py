@@ -3,6 +3,7 @@ import argparse
 from contextvars import ContextVar
 from dataclasses import dataclass
 from getpass import getpass
+from pathlib import Path
 import hashlib
 import hmac
 import json
@@ -92,18 +93,20 @@ class TeamAccess:
         if row:
             return Member(name, row[0], frozenset(json.loads(row[1])), frozenset(json.loads(row[2])))
 
-    def save_resource(self, kind, member, datasets, required, payload, recipient=None):
-        key = uuid4().hex
-        with archive_connection(self.path) as db:
-            days = self.report_days if kind == "report" else self.download_days
-            db.execute("INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)", (key, kind, member.name, recipient or member.name,
-                       json.dumps(datasets), json.dumps(required), json.dumps(payload, ensure_ascii=False, default=str),
-                       int(time.time()) + days*86400))
+    def save_resource(self, kind, member, datasets, required, payload, recipient=None, *, key=None, db=None):
+        if db is None:
+            with archive_connection(self.path) as connection:
+                return self.save_resource(kind, member, datasets, required, payload, recipient, key=key, db=connection)
+        key = key or uuid4().hex
+        if kind == "file":
+            path = Path(payload)
+            if path.is_relative_to(self.directory.parent):
+                payload = path.relative_to(self.directory.parent).as_posix()
+        days = self.report_days if kind == "report" else self.download_days
+        db.execute("INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)", (key, kind, member.name, recipient or member.name,
+                   json.dumps(datasets), json.dumps(required), json.dumps(payload, ensure_ascii=False, default=str),
+                   int(time.time()) + days*86400))
         return key
-
-    def has_recipient(self, name, manifest):
-        recipient = self.member(name)
-        return bool(recipient and recipient.sees(manifest))
 
     def resources(self, member, kind):
         with archive_connection(self.path) as db:
@@ -119,17 +122,23 @@ class TeamAccess:
             db.execute("DELETE FROM resources WHERE expires<=?", (now,))
 
 
-def check_team_plan(plan):
-    member = CURRENT_MEMBER.get()
+def plan_requires_details(plan):
     def uses_order_key(node):
         return node and (node.field == "order_id" or any(uses_order_key(child) for child in node.children))
     raw_diagnosis = plan.intent == "diagnose" and plan.diagnosis not in {"quality_summary", "sales_spike", "seller_outlier"}
-    if member and not member.can("details") and (plan.intent in {"details", "join_example"} or raw_diagnosis
-            or plan.selected_order_id or uses_order_key(plan.order_where) or plan.output_mode in {"seller_audit", "quality_check"}):
+    return bool(plan.intent in {"details", "join_example"} or raw_diagnosis or plan.selected_order_id
+                or uses_order_key(plan.order_where) or plan.output_mode in {"seller_audit", "quality_check"})
+
+
+def check_team_plan(plan):
+    member = CURRENT_MEMBER.get()
+    if member and not member.can("details") and plan_requires_details(plan):
         raise ValueError("此操作需要订单明细权限")
 
 
 def main():
+    from app.team_jobs import process_lock
+
     if not os.environ.get("ANALYSIS_INSTANCE_DIR"):
         raise SystemExit("请先设置 ANALYSIS_INSTANCE_DIR 为客户实例目录")
     parser = argparse.ArgumentParser(description="管理本实例的成员及资源权限")
@@ -140,12 +149,15 @@ def main():
     parser.add_argument("--grant", choices=sorted(OPERATIONS), action="append", default=[])
     parser.add_argument("--access-only", action="store_true", help="只替换已有账号的角色及授权")
     args = parser.parse_args()
-    access = TeamAccess()
     datasets = [*args.dataset, *("feed:"+key for key in args.feed)]
-    if args.access_only:
-        access.change_access(args.name, args.role, args.grant, datasets)
-    else:
-        access.set_member(args.name, getpass("设置此账号的口令："), args.role, args.grant, datasets)
+    password = None if args.access_only else getpass("设置此账号的口令：")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with process_lock(DATA_DIR, "maintenance"):
+        access = TeamAccess()
+        if args.access_only:
+            access.change_access(args.name, args.role, args.grant, datasets)
+        else:
+            access.set_member(args.name, password, args.role, args.grant, datasets)
     print("已保存成员和授权。")
 
 

@@ -42,62 +42,69 @@ def main():
     print("新版交付后，输入“数据更新了”或 /sync 可同步并按当前条件重算。")
     failed_question = None
     while (question := input("\n问题> ").strip()) != "/exit":
-        if is_delivery_request(question):
-            updated, text = refresh_delivery(agent, session, question)
-            if updated.dataset_id != session.dataset_id:
-                failed_question = None
-            session = updated
-            print(text)
-            if session.last_evidence.get("record_id"):
-                print(f"\n当前结果依据：runs/{session.dataset_id}/{session.last_evidence['record_id']}.json")
+        if not question:
             continue
-        if question.startswith("/drill "):
-            _, row, dimension = question.split()
-            turn = agent.drill(session, int(row) - 1, dimension)
-        elif question == "/back":
-            turn = agent.back(session)
-        elif question in {"/next", "/prev"}:
-            turn = agent.page(session, 1 if question == "/next" else -1)
-        elif question == "/continue":
-            if session.working_plan is None:
-                print("当前没有可继续的查询。")
+        try:
+            if is_delivery_request(question):
+                updated, text = refresh_delivery(agent, session, question)
+                if updated.dataset_id != session.dataset_id:
+                    failed_question = None
+                session = updated
+                print(text)
+                if session.last_evidence.get("record_id"):
+                    print(f"\n当前结果依据：runs/{session.dataset_id}/{session.last_evidence['record_id']}.json")
                 continue
-            turn = agent.resume_inspection(session)
-        elif question == "/export":
-            print(agent.export(session))
-            continue
-        elif question.startswith("/compare "):
-            target = resolve_dataset(question.split(maxsplit=1)[1])
-            turn = agent.compare(session, {"target_dataset_id": target})
-            print(turn.text)
-            print(turn.evidence["report_file"])
-            continue
-        elif question == "/continue-compare":
-            turn = agent.compare(session, resume=True)
-            print(turn.text)
-            print(turn.evidence["report_file"])
-            continue
-        elif question.startswith(("/sql ", "/raw ")):
-            command, sql = question.split(" ", 1)
-            evidence = workspace.execute(session, sql, [], "raw" if command == "/raw" else "analysis_result")
-            print(sql_answer(evidence))
-            print(evidence["result"])
-            continue
-        else:
-            if question == "/retry":
-                if failed_question is None:
-                    print("当前没有待重发的模型问题。")
+            command, *arguments = question.split(maxsplit=1)
+            if command == "/drill":
+                parts = arguments[0].split() if arguments else []
+                if len(parts) != 2 or not parts[0].isdecimal():
+                    raise ValueError("用法：/drill 行号 维度，行号从 1 开始。")
+                turn = agent.drill(session, int(parts[0]) - 1, parts[1])
+            elif question == "/back":
+                turn = agent.back(session)
+            elif question in {"/next", "/prev"}:
+                turn = agent.page(session, 1 if question == "/next" else -1)
+            elif question == "/continue":
+                if session.working_plan is None:
+                    print("当前没有可继续的查询。")
                     continue
-                question = failed_question
-            try:
-                if agent.provider is None:
-                    agent.provider = ChatCompletionsProvider()
-                turn = agent.respond(session, question, args.practice)
-            except (httpx.HTTPError, ModelConfigurationError) as error:
-                failed_question = question
-                print(model_error_message(error) + " 原问题已保留，可输入 /retry。")
+                turn = agent.resume_inspection(session)
+            elif question == "/export":
+                print(agent.export(session))
                 continue
-            failed_question = None
+            elif command == "/compare" or question == "/continue-compare":
+                if command == "/compare":
+                    if not arguments:
+                        raise ValueError("用法：/compare 目标快照ID")
+                    turn = agent.compare(session, {"target_dataset_id": resolve_dataset(arguments[0])})
+                else:
+                    turn = agent.compare(session, resume=True)
+                print(turn.text)
+                print(turn.evidence["report_file"])
+                continue
+            elif command in {"/sql", "/raw"}:
+                if not arguments:
+                    raise ValueError(f"用法：{command} SELECT …")
+                scope = "raw" if command == "/raw" else "analysis_result"
+                evidence = workspace.execute(session, arguments[0], [], scope)
+                print(sql_answer(evidence))
+                print(evidence["result"])
+                continue
+            else:
+                if question == "/retry":
+                    if failed_question is None:
+                        print("当前没有待重发的模型问题。")
+                        continue
+                    question = failed_question
+                turn = agent.respond(session, question, args.practice, provider_factory=ChatCompletionsProvider)
+                failed_question = None
+        except (httpx.HTTPError, ModelConfigurationError) as error:
+            failed_question = question
+            print(model_error_message(error) + " 原问题已保留，可输入 /retry。")
+            continue
+        except ValueError as error:
+            print(f"未完成本次操作：{error}")
+            continue
         print(turn.text)
         if "record_id" in turn.evidence:
             print(f"\n证据：runs/{session.dataset_id}/{turn.evidence['record_id']}.json")

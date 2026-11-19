@@ -1,6 +1,7 @@
 """比较入口、分阶段证据和可恢复报告；原分析会话的查询状态保持独立。"""
 import json
-from uuid import uuid4
+from pathlib import PureWindowsPath
+from uuid import UUID, uuid4
 import zipfile
 
 from app.config import RUNS_DIR
@@ -125,6 +126,45 @@ def prepare_comparison(agent, session, request):
     return state
 
 
+def locate_comparison(record, dataset_id):
+    comparison_id = record.get("comparison_id") or PureWindowsPath(record["report_file"]).parent.name
+    directory = RUNS_DIR / dataset_id / "comparisons" / UUID(comparison_id).hex
+    record["report_file"] = str(directory / "report.json")
+    if record.get("bundle_file") or record["status"] == "completed":
+        record["bundle_file"] = str(directory / "comparison.zip")
+    diff = record.get("stages", {}).get("diff", {}).get("report", {})
+    if "csv_file" in diff:
+        diff["csv_file"] = str(directory / "differences.csv")
+    return directory
+
+
+def publish_bundle(directory, state, report):
+    temporary = directory / "comparison.zip.tmp"
+    with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("report.json", report)
+        for name in ("diff.json", "differences.csv"):
+            archive.write(directory / name, name)
+        for side in ("source", "target"):
+            archive.writestr(side + "_evidence.json", json.dumps(state["stages"][side]["evidence"], ensure_ascii=False, indent=2, default=str))
+    temporary.replace(directory / "comparison.zip")
+
+
+def recover_bundle(directory, state=None):
+    expected = {"report.json", "diff.json", "differences.csv", "source_evidence.json", "target_evidence.json"}
+    try:
+        with zipfile.ZipFile(directory / "comparison.zip") as archive:
+            if set(archive.namelist()) == expected:
+                return
+    except (FileNotFoundError, zipfile.BadZipFile):
+        pass
+    if state is None:
+        report = (directory / "report.json").read_text(encoding="utf-8")
+        state = json.loads(report)
+    else:
+        report = json.dumps(state, ensure_ascii=False, default=str, indent=2)
+    publish_bundle(directory, state, report)
+
+
 def compare(agent, session, request=None, *, resume=False):
     if session is None:
         raise PlanError("请先建立或恢复来源分析")
@@ -139,18 +179,20 @@ def compare(agent, session, request=None, *, resume=False):
         manifest = agent.executors[state[side + "_dataset_id"]].manifest
         if snapshot_identity(manifest) != state[side + "_snapshot"]:
             raise PlanError("比较绑定的快照身份已改变，请新建比较")
-    if state["implementation_sha256"] != implementation_hash():
-        raise PlanError("计算实现已改变，请以同一实现重新比较两侧")
+    directory = locate_comparison(state, session.dataset_id)
     if resume and state["status"] == "completed":
+        recover_bundle(directory, state)
         from app.orchestrator import Turn
         return Turn(comparison_text(state), state)
-    directory = RUNS_DIR / session.dataset_id / "comparisons" / state["comparison_id"]
+    if state["implementation_sha256"] != implementation_hash():
+        raise PlanError("计算实现已改变，请以同一实现重新比较两侧")
     directory.mkdir(parents=True, exist_ok=True)
-    state["report_file"] = str(directory / "report.json")
-    def save():
+    def write_report(report):
         temporary = directory / "report.tmp"
-        temporary.write_text(json.dumps(state, ensure_ascii=False, default=str, indent=2), encoding="utf-8")
+        temporary.write_text(report, encoding="utf-8")
         temporary.replace(directory / "report.json")
+    def save():
+        write_report(json.dumps(state, ensure_ascii=False, default=str, indent=2))
         agent.checkpoint(session)
     save()
     for side in ("source", "target"):
@@ -198,7 +240,7 @@ def compare(agent, session, request=None, *, resume=False):
         report = run_diff(paths, plans, directory, comparable=not state["contract_changes"])
         stage.update(status=report["status"], report=report, error=report.get("error"))
         save()
-    state["status"] = "completed" if all(stage["status"] == "completed" for stage in state["stages"].values()) else "incomplete"
+    state = dict(state, status="completed" if all(stage["status"] == "completed" for stage in state["stages"].values()) else "incomplete")
     text = comparison_text(state)
     with TurnTrace(session.session_id, session.dataset_id, "比较数据版本", "snapshot-comparison") as trace:
         artifact = write_artifact(session, agent.executors[session.dataset_id].manifest, "snapshot_comparison", "比较数据版本",
@@ -207,16 +249,15 @@ def compare(agent, session, request=None, *, resume=False):
              "source_record_id": state["stages"]["source"].get("evidence", {}).get("record_id"),
              "target_record_id": state["stages"]["target"].get("evidence", {}).get("record_id")}, trace)
     state["artifact_id"] = artifact["record_id"]
-    session.remember("比较数据版本", text)
-    state["transcript_turn_index"] = len(session.transcript) // 2 - 1
-    save()
+    state["transcript_turn_index"] = len(session.transcript) // 2
     if state["status"] == "completed":
         state["bundle_file"] = str(directory / "comparison.zip")
-        save()
-        with zipfile.ZipFile(state["bundle_file"], "w", zipfile.ZIP_DEFLATED) as archive:
-            for name in ("report.json", "diff.json", "differences.csv"):
-                archive.write(directory / name, name)
-            for side in ("source", "target"):
-                archive.writestr(side + "_evidence.json", json.dumps(state["stages"][side]["evidence"], ensure_ascii=False, indent=2, default=str))
+    report = json.dumps(state, ensure_ascii=False, default=str, indent=2)
+    if state["status"] == "completed":
+        publish_bundle(directory, state, report)
+    write_report(report)
+    session.comparison_state = state
+    session.remember("比较数据版本", text)
+    agent.checkpoint(session)
     from app.orchestrator import Turn
     return Turn(text, state)

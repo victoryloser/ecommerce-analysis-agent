@@ -1,4 +1,3 @@
-import hashlib
 import time
 from datetime import date
 from pathlib import Path
@@ -14,6 +13,7 @@ from app.sql_guard import validate_sql
 from app.sql_audit import audit_query
 from app.quality import query_schema
 from app.calculation import CalculationContext
+from app.snapshots import file_sha256
 
 
 class Executor:
@@ -21,7 +21,7 @@ class Executor:
         self.manifest = load_manifest(dataset_id, data_dir)
         self.context = CalculationContext.from_manifest(self.manifest)
         self.path = data_dir / f"{dataset_id}.duckdb"
-        if hashlib.sha256(self.path.read_bytes()).hexdigest() != self.manifest["database_sha256"]:
+        if file_sha256(self.path) != self.manifest["database_sha256"]:
             raise ValueError("数据库快照与manifest不一致，请重新导入")
 
     def register(self, session: Session, plan: AnalysisPlan) -> str:

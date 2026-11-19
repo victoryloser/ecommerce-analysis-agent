@@ -1,6 +1,7 @@
 import os
 import time
 import hashlib
+import math
 from urllib.parse import urlsplit
 from typing import Protocol
 
@@ -8,6 +9,7 @@ import httpx
 from dotenv import load_dotenv
 
 from app.config import INSTANCE_DIR
+from app.team_operations import observe
 
 
 class Provider(Protocol):
@@ -20,11 +22,17 @@ class ModelConfigurationError(ValueError):
     pass
 
 
+class ModelResponseError(httpx.RemoteProtocolError):
+    pass
+
+
 def model_error_message(error: httpx.HTTPError | ModelConfigurationError) -> str:
     if isinstance(error, ModelConfigurationError):
         return str(error)
     if isinstance(error, httpx.TimeoutException):
         return "模型请求超时。请稍后重发原问题。"
+    if isinstance(error, ModelResponseError):
+        return "模型服务返回了无效的对话响应。请检查接口是否支持 Chat Completions，再重发原问题。"
     if isinstance(error, httpx.HTTPStatusError):
         status = error.response.status_code
         if status in {401, 403}:
@@ -33,7 +41,7 @@ def model_error_message(error: httpx.HTTPError | ModelConfigurationError) -> str
             return "模型服务暂时限流（HTTP 429）。请稍后重发原问题。"
         if status >= 500:
             return f"模型服务暂时不可用（HTTP {status}）。请稍后重发原问题。"
-            return f"模型服务未接受请求（HTTP {status}）。请检查模型和接口配置。若修改了 .env，请重启应用。"
+        return f"模型服务未接受请求（HTTP {status}）。请检查模型和接口配置。若修改了 .env，请重启应用。"
     return "无法连接模型服务。请检查网络和接口地址后重发原问题。"
 
 
@@ -52,6 +60,8 @@ class ChatCompletionsProvider:
             self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
         except ValueError as error:
             raise ModelConfigurationError("LLM_TIMEOUT_SECONDS 必须填写秒数。请修正 .env 并重启应用。") from error
+        if not math.isfinite(self.timeout) or self.timeout <= 0:
+            raise ModelConfigurationError("LLM_TIMEOUT_SECONDS 必须为有限的正数。请修正 .env 并重启应用。")
         thinking = os.getenv("LLM_ENABLE_THINKING")
         if thinking is not None and thinking.lower() not in {"true", "false"}:
             raise ModelConfigurationError("LLM_ENABLE_THINKING 必须为 true 或 false。请修正 .env 并重启应用。")
@@ -62,22 +72,41 @@ class ChatCompletionsProvider:
         payload = {"model": self.model, "messages": messages, "temperature": 0, "response_format": {"type": "json_object"}}
         if self.enable_thinking is not None:
             payload["enable_thinking"] = self.enable_thinking
-        response = httpx.post(
-            f"{self.base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json=payload,
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        body = response.json()
+        status, tokens = "invalid_response", None
+        try:
+            response = httpx.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=payload,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            try:
+                body = response.json()
+                content = body["choices"][0]["message"]["content"]
+            except (ValueError, TypeError, KeyError, IndexError) as error:
+                raise ModelResponseError("无效的对话响应", request=response.request) from error
+            if not isinstance(content, str) or not content.strip():
+                raise ModelResponseError("模型没有返回文本内容", request=response.request)
+            usage = body.get("usage")
+            usage = usage if isinstance(usage, dict) else {}
+            tokens = usage.get("total_tokens") if isinstance(usage.get("total_tokens"), int) else None
+            status = "ok"
+        except ModelResponseError:
+            raise
+        except httpx.HTTPError as error:
+            status = str(error.response.status_code) if isinstance(error, httpx.HTTPStatusError) else type(error).__name__
+            raise
+        finally:
+            observe("model", status, round((time.perf_counter()-started)*1000), tokens)
         from app.trace import CURRENT_TRACE
         trace = CURRENT_TRACE.get()
         if trace:
             trace.record("provider_response", configured_model=self.model, returned_model=body.get("model"),
-                         usage={k: v for k, v in body.get("usage", {}).items()
-                                if k in {"prompt_tokens", "completion_tokens", "total_tokens"}} if body.get("usage") else None,
+                         usage={k: v for k, v in usage.items()
+                                if k in {"prompt_tokens", "completion_tokens", "total_tokens"}} or None,
                          elapsed_ms=round((time.perf_counter()-started)*1000))
-        return body["choices"][0]["message"]["content"]
+        return content
 
     def evaluation_config(self):
         endpoint = urlsplit(self.base_url)

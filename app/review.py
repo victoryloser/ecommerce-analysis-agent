@@ -13,7 +13,7 @@ from app.orchestrator import AnalysisAgent
 from app.semantic import PlanError
 from app.session import Session
 from app.session_store import snapshot_identity
-from app.snapshot_comparison import fixed_plan
+from app.snapshot_comparison import fixed_plan, locate_comparison, recover_bundle
 from app.trace import TurnTrace
 
 
@@ -48,7 +48,12 @@ def load_review(agent, session, card_id):
     manifest = agent.executors[session.dataset_id].manifest
     if card_id not in session.reviews:
         raise PlanError("请从当前会话的已保存复盘中选择")
-    return read_evidence(manifest, session.session_id, card_id)
+    card = read_evidence(manifest, session.session_id, card_id)
+    if version := card.get("version"):
+        directory = locate_comparison(version, session.dataset_id)
+        if version["status"] == "completed":
+            recover_bundle(directory)
+    return card
 
 
 def build_review(agent, session, source_record):
@@ -108,10 +113,11 @@ def compare_review(agent, session, card_id, target):
     isolated = Session(session.dataset_id, session_id=session.session_id, analysis_evidence=overview)
     prior = session.comparison_state
     if prior.get("status") == "completed" and prior["original_record_id"] == overview["record_id"] and prior["target_dataset_id"] == target and prior["request"]["mode"] == "fixed_scope":
-        state = prior
+        isolated.comparison_state = prior
+        state = viewer.compare(isolated, resume=True).evidence
     else:
         state = viewer.compare(isolated, {"target_dataset_id": target, "source_record_id": overview["record_id"]}).evidence
-    version = {key: state[key] for key in ("status", "artifact_id", "target_snapshot", "target_label", "contract_changes")}
+    version = {key: state[key] for key in ("comparison_id", "status", "artifact_id", "target_snapshot", "target_label", "contract_changes")}
     version["report_file"] = state["report_file"]
     version["bundle_file"] = state.get("bundle_file")
     if state["status"] == "completed":

@@ -63,8 +63,11 @@ metadata中没有促销等数据，不能臆造字段或作因果结论。不要
 """
 
 
+CONTINUE_COMMANDS = {"/continue", "继续", "继续未完成任务", "重试"}
+
+
 def make_plan(provider: Provider, manifest: dict, session: Session, question: str, practice_context: bool, trace: TurnTrace) -> tuple[AnalysisPlan, int]:
-    if question.strip() in {"/continue", "继续", "继续未完成任务", "重试"} and session.working_plan:
+    if question.strip() in CONTINUE_COMMANDS and session.working_plan:
         return session.working_plan.model_copy(deep=True), 0
     completed = resolve_slots(session.pending_plan, question)
     if completed is not None:

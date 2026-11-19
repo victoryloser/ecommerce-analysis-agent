@@ -17,6 +17,19 @@ from build_release import allowed, commit_files
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = [
     ["source isolation", ["-c", "from pathlib import Path; from app.config import ROOT; assert ROOT == Path.cwd(); assert not (ROOT/'.env').exists(); assert not (ROOT/'material').exists()"]],
+    ["team health and worker", ["-c", """import os
+from pathlib import Path
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+from fastapi.testclient import TestClient
+with TemporaryDirectory() as instance:
+    os.environ["ANALYSIS_INSTANCE_DIR"] = instance
+    from app.team import create_app
+    with TestClient(create_app(Path(instance) / "data")) as client:
+        assert client.get("/healthz").json() == {"service": "online"}
+        subprocess.run([sys.executable, "-m", "app.team_jobs", "--once"], check=True)
+"""]],
     ["tests", ["-m", "pytest", "-q", "-p", "no:cacheprovider", "--junitxml=runs/pytest.xml"]],
 ]
 
@@ -34,13 +47,13 @@ def main():
               "validation_scope": "offline-clean-package", "formal_data_acceptance": "not_run", "live_model_acceptance": "not_run",
               "created_at": datetime.now(timezone.utc).isoformat(), "model_calls": False, "steps": []}
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("LLM_", "JUDGE_", "SECOND_JUDGE_", "TAX_AGENT_"))
-           and k not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"}}
+           if not k.startswith(("LLM_", "JUDGE_", "SECOND_JUDGE_", "TAX_AGENT_", "TEAM_"))
+           and k not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "ANALYSIS_INSTANCE_DIR", "DATA_DELIVERY_DIR"}}
     env.update(PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1")
     build = ROOT / ".build"
     build.mkdir(exist_ok=True)
     try:
-        with tempfile.TemporaryDirectory(prefix="release-check-", dir=build) as directory:
+        with tempfile.TemporaryDirectory(prefix="release-check-", dir=build, ignore_cleanup_errors=True) as directory:
             work = Path(directory)
             with ZipFile(archive_path) as archive:
                 manifest = json.loads(archive.read("MANIFEST.json"))
@@ -82,6 +95,8 @@ def main():
             report["pytest"] = counts
             assert hashlib.sha256(archive_path.read_bytes()).hexdigest() == digest
             report["status"] = "passed"
+        if work.exists():
+            report["cleanup_pending"] = str(work)
     except Exception as error:
         report.update(status="failed", failure=f"{type(error).__name__}: {error}")
         raise

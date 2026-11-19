@@ -4,7 +4,7 @@ from app.answers import answer, explain
 from app.config import MAX_ROWS
 from app.evidence import write_evidence, write_artifact
 from app.executor import Executor
-from app.planner import make_plan
+from app.planner import CONTINUE_COMMANDS, make_plan
 from app.providers import Provider
 from app.semantic import PlanError
 from app.session import Session
@@ -19,13 +19,19 @@ class Turn:
     evidence: dict
 
 
+RESET_COMMANDS = {"重新开始", "/reset"}
+
+
 class AnalysisAgent:
     def __init__(self, provider: Provider, executors: dict[str, Executor], store: SessionStore | None = None):
         self.provider = provider
         self.executors = executors
         self.store = store
 
-    def respond(self, session: Session, question: str, practice_context: bool = False, *, trace: TurnTrace | None = None) -> Turn:
+    def respond(self, session: Session, question: str, practice_context: bool = False, *, trace: TurnTrace | None = None, provider_factory=None) -> Turn:
+        local = question.strip() in RESET_COMMANDS or (question.strip() in CONTINUE_COMMANDS and session.working_plan is not None)
+        if self.provider is None and provider_factory and not local:
+            self.provider = provider_factory()
         with trace or TurnTrace(session.session_id, session.dataset_id, question, self.provider.model if self.provider else "deterministic-resume") as trace:
             turn = self._respond(session, question, practice_context, trace)
             session.last_evidence = turn.evidence
@@ -36,7 +42,7 @@ class AnalysisAgent:
             return turn
 
     def _respond(self, session: Session, question: str, practice_context: bool, trace: TurnTrace) -> Turn:
-        if question.strip() in {"重新开始", "/reset"}:
+        if question.strip() in RESET_COMMANDS:
             session.last_successful_plan = None
             session.last_result = None
             session.pending_plan = None
@@ -447,8 +453,7 @@ class AnalysisAgent:
         offset = 0 if reset else old_offset + displayed if delta > 0 else max(0, old_offset-current_size)
         if evidence["type"] == "sql_exploration":
             from app.sql_workspace import SQLWorkspace, sql_answer
-            state = session.sql_state
-            new = SQLWorkspace(self.executors, self.store).execute(session, state["sql"], state["parameters"], state["scope"], offset=offset, limit=size)
+            new = SQLWorkspace(self.executors, self.store).page(session, evidence, offset, size)
             return Turn(sql_answer(new), new)
         plan = AnalysisPlan.model_validate(evidence["plan"])
         executor = self.executors[session.dataset_id]
@@ -481,9 +486,8 @@ class AnalysisAgent:
         evidence = display_evidence(session.last_evidence)
         executor = self.executors[session.dataset_id]
         if evidence.get("type") == "sql_exploration":
-            from app.sql_workspace import compile_exploration
-            state = session.sql_state
-            compiled, _ = compile_exploration(session, executor, state["sql"], state["parameters"], state["scope"])
+            from app.sql_workspace import compile_recorded_query
+            compiled, _ = compile_recorded_query(executor, evidence)
         elif evidence.get("type") == "query":
             plan = AnalysisPlan.model_validate(evidence["plan"])
             from app.semantic import validate_plan
@@ -503,7 +507,7 @@ class AnalysisAgent:
             if result.status not in {"ok", "empty"}:
                 path.unlink(missing_ok=True)
                 raise ValueError(result.error)
-            import hashlib
+            from app.snapshots import file_sha256
             return write_artifact(session, executor.manifest, "export", "完整CSV导出",
-                {"source_record_id": evidence["record_id"], "csv_file": str(path), "csv_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                {"source_record_id": evidence["record_id"], "csv_file": str(path), "csv_sha256": file_sha256(path),
                  "row_count": result.row_count, "sql": compiled.sql, "parameters": compiled.parameters}, trace)
